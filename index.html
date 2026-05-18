@@ -1,0 +1,1268 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>电商数据看板</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" crossorigin></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<style>
+/* ============================================================
+   Design tokens — sophisticated minimalism
+   ============================================================ */
+:root {
+  --bg:           #F6F5F1;
+  --bg-elev:      #FBFAF7;
+  --surface:      #FFFFFF;
+  --surface-hover:#FAFAF6;
+  --border:       #E7E5DE;
+  --border-strong:#D4D2CA;
+  --divider:      #EFEDE6;
+
+  --ink:          #14140F;
+  --ink-2:        #3D3D36;
+  --ink-3:        #6F6E64;
+  --ink-4:        #97968B;
+  --ink-5:        #BDBCB1;
+
+  --accent:       oklch(54% 0.17 258);
+  --accent-soft:  oklch(96% 0.02 258);
+  --accent-ink:   oklch(38% 0.16 258);
+  --accent-line:  oklch(54% 0.17 258 / 0.18);
+
+  --pos:          oklch(54% 0.10 150);
+  --pos-soft:     oklch(96% 0.03 150);
+  --neg:          oklch(56% 0.16 30);
+  --neg-soft:     oklch(96% 0.03 30);
+
+  --font-sans:    "Manrope", -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", "Microsoft YaHei", sans-serif;
+  --font-mono:    "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --shadow-1: 0 1px 0 rgba(20, 20, 15, 0.04), 0 1px 2px rgba(20, 20, 15, 0.03);
+  --shadow-2: 0 4px 14px -6px rgba(20, 20, 15, 0.10), 0 1px 0 rgba(20, 20, 15, 0.04);
+  --shadow-pop: 0 16px 40px -16px rgba(20, 20, 15, 0.20), 0 2px 4px rgba(20, 20, 15, 0.06);
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  font-family: var(--font-sans);
+  background: var(--bg);
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: "ss01", "cv11";
+  letter-spacing: -0.005em;
+}
+.mono { font-family: var(--font-mono); font-feature-settings: "tnum", "zero"; }
+
+/* Top bar */
+.topbar {
+  position: sticky; top: 0; z-index: 30;
+  background: rgba(251, 250, 247, 0.85);
+  backdrop-filter: saturate(180%) blur(14px);
+  -webkit-backdrop-filter: saturate(180%) blur(14px);
+  border-bottom: 1px solid var(--border);
+}
+.topbar-inner {
+  max-width: 1480px; margin: 0 auto;
+  padding: 14px 32px;
+  display: flex; align-items: center; gap: 28px;
+}
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 14px; letter-spacing: -0.01em; }
+.brand-mark {
+  width: 22px; height: 22px; border-radius: 6px;
+  background: var(--ink); display: grid; place-items: center;
+  color: #fff; font-family: var(--font-mono); font-size: 11px; font-weight: 600;
+}
+.brand-name { color: var(--ink); }
+.brand-tag { color: var(--ink-4); font-size: 12px; font-weight: 400; margin-left: 4px; letter-spacing: 0; }
+
+.tabs {
+  display: flex; gap: 2px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 999px; padding: 3px;
+}
+.tab {
+  appearance: none; border: 0; background: transparent;
+  color: var(--ink-3); font-family: inherit; font-size: 13px; font-weight: 500;
+  padding: 7px 18px; border-radius: 999px; cursor: pointer;
+  transition: color .15s, background .15s; letter-spacing: 0.01em;
+}
+.tab:hover { color: var(--ink); }
+.tab.is-active { background: var(--ink); color: #fff; }
+
+.topbar-right { margin-left: auto; display: flex; align-items: center; gap: 12px; color: var(--ink-3); font-size: 12.5px; }
+.topbar-divider { width: 1px; height: 14px; background: var(--border); }
+.status-dot { width: 6px; height: 6px; border-radius: 999px; background: var(--pos); box-shadow: 0 0 0 3px var(--pos-soft); }
+
+/* Layout */
+.shell { max-width: 1480px; margin: 0 auto; padding: 24px 32px 80px; }
+
+/* Filter row */
+.filter-row { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 22px; }
+.seg { display: inline-flex; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 3px; gap: 2px; }
+.seg-btn {
+  appearance: none; border: 0; background: transparent;
+  color: var(--ink-3); font-family: inherit; font-size: 13px; font-weight: 500;
+  padding: 6px 14px; border-radius: 6px; cursor: pointer; transition: all .15s;
+}
+.seg-btn:hover { color: var(--ink); }
+.seg-btn.is-active { background: var(--ink); color: #fff; }
+.filter-group { display: inline-flex; align-items: center; gap: 8px; }
+.filter-label { font-size: 12px; color: var(--ink-3); font-weight: 500; }
+.select {
+  appearance: none; -webkit-appearance: none;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+  padding: 7px 30px 7px 12px; font-family: inherit; font-size: 13px; color: var(--ink);
+  cursor: pointer; min-width: 130px;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'><path d='M3 4.5L6 7.5L9 4.5' stroke='%236F6E64' stroke-width='1.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+  background-repeat: no-repeat; background-position: right 10px center;
+  transition: border-color .15s;
+}
+.select:hover { border-color: var(--border-strong); }
+.select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-line); }
+.date-input {
+  appearance: none; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; padding: 7px 12px;
+  font-family: var(--font-mono); font-size: 12.5px; color: var(--ink); cursor: pointer;
+}
+.date-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-line); }
+.spacer-x { flex: 1 1 auto; }
+
+/* Metric cards */
+.metrics-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 24px; }
+.metric-card {
+  position: relative; background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r-md); padding: 18px 18px 14px; cursor: grab;
+  transition: box-shadow .18s, transform .18s, border-color .18s;
+  box-shadow: var(--shadow-1); user-select: none; min-height: 132px;
+  display: flex; flex-direction: column; justify-content: space-between;
+}
+.metric-card:hover { border-color: var(--border-strong); box-shadow: var(--shadow-2); }
+.metric-card.is-active { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-line), var(--shadow-2); }
+.metric-card.is-dragging { opacity: 0.4; cursor: grabbing; }
+.metric-card.is-drop-target { border-color: var(--accent); background: var(--accent-soft); }
+.metric-card:active { cursor: grabbing; }
+.metric-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.metric-label { font-size: 12.5px; color: var(--ink-3); font-weight: 500; letter-spacing: 0.01em; }
+.metric-handle { opacity: 0; color: var(--ink-5); transition: opacity .15s; display: flex; }
+.metric-card:hover .metric-handle { opacity: 1; }
+.metric-value-row { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.metric-value { font-family: var(--font-mono); font-size: 24px; font-weight: 600; color: var(--ink); letter-spacing: -0.02em; line-height: 1.1; }
+.metric-delta { display: inline-flex; align-items: center; gap: 2px; font-family: var(--font-mono); font-size: 12px; font-weight: 500; letter-spacing: 0; }
+.metric-delta.up   { color: var(--pos); }
+.metric-delta.down { color: var(--neg); }
+.metric-delta.flat { color: var(--ink-4); }
+.metric-prev { font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-4); margin-top: 4px; }
+.metric-spark { margin-top: 10px; margin-left: -4px; margin-right: -4px; }
+.metric-card.is-active .metric-label { color: var(--accent-ink); }
+
+/* Panel */
+.panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md); box-shadow: var(--shadow-1); }
+.panel-head { padding: 18px 22px 14px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--divider); }
+.panel-title { font-size: 14px; font-weight: 600; color: var(--ink); letter-spacing: -0.01em; }
+.panel-subtitle { font-size: 12px; color: var(--ink-4); margin-left: 4px; }
+.panel-actions { margin-left: auto; display: flex; gap: 6px; align-items: center; }
+.panel-body { padding: 20px 22px 24px; }
+
+/* Chips */
+.chip-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip {
+  appearance: none; border: 1px solid var(--border); background: var(--surface);
+  color: var(--ink-2); font-family: inherit; font-size: 12.5px; font-weight: 500;
+  padding: 5px 12px; border-radius: 999px; cursor: pointer; transition: all .15s;
+}
+.chip:hover { border-color: var(--border-strong); }
+.chip.is-active { background: var(--ink); color: #fff; border-color: var(--ink); }
+
+/* Trend chart */
+.trend-wrap { margin-top: 16px; position: relative; }
+.trend-svg { width: 100%; height: 320px; display: block; }
+.trend-tooltip {
+  position: absolute; background: var(--ink); color: #fff;
+  padding: 8px 12px; border-radius: 8px;
+  font-size: 12px; font-family: var(--font-mono);
+  pointer-events: none; transform: translate(-50%, -110%);
+  white-space: nowrap; box-shadow: var(--shadow-pop);
+  opacity: 0; transition: opacity .12s;
+}
+.trend-tooltip.is-visible { opacity: 1; }
+.trend-tooltip .t-label { color: var(--ink-5); font-size: 10.5px; letter-spacing: 0.04em; text-transform: uppercase; margin-bottom: 2px; display: block; }
+.trend-tooltip::after {
+  content: ""; position: absolute; left: 50%; bottom: -4px;
+  width: 8px; height: 8px; background: var(--ink);
+  transform: translateX(-50%) rotate(45deg);
+}
+
+/* Table */
+.tbl { width: 100%; border-collapse: collapse; font-family: var(--font-mono); font-size: 13px; }
+.tbl thead th {
+  text-align: right; padding: 10px 16px;
+  font-family: var(--font-sans); font-size: 12px; font-weight: 500;
+  color: var(--ink-4); letter-spacing: 0.04em; text-transform: uppercase;
+  border-bottom: 1px solid var(--divider); background: var(--bg-elev);
+}
+.tbl thead th:first-child { text-align: left; padding-left: 22px; }
+.tbl thead th:last-child  { padding-right: 22px; }
+.tbl tbody td {
+  padding: 14px 16px; border-bottom: 1px solid var(--divider);
+  text-align: right; color: var(--ink); font-feature-settings: "tnum";
+}
+.tbl tbody td:first-child {
+  text-align: left; padding-left: 22px;
+  font-family: var(--font-sans); font-weight: 500; font-size: 13px; color: var(--ink);
+}
+.tbl tbody td:last-child { padding-right: 22px; }
+.tbl tbody tr:last-child td { border-bottom: 0; }
+.tbl tbody tr:hover { background: var(--surface-hover); }
+.tbl .t-pos { color: var(--pos); }
+.tbl .t-neg { color: var(--neg); }
+.tbl .t-muted { color: var(--ink-4); }
+.tbl .t-bar { display: inline-block; width: 60px; height: 4px; background: var(--divider); border-radius: 999px; vertical-align: middle; margin-left: 8px; overflow: hidden; position: relative; }
+.tbl .t-bar > i { position: absolute; left: 0; top: 0; bottom: 0; background: var(--accent); border-radius: inherit; }
+
+/* Import view */
+.import-wrap { display: grid; grid-template-columns: 1.2fr 1fr; gap: 20px; align-items: start; }
+@media (max-width: 1100px) { .import-wrap { grid-template-columns: 1fr; } }
+.dropzone {
+  background: var(--surface); border: 1.5px dashed var(--border-strong);
+  border-radius: var(--r-lg); padding: 56px 40px;
+  text-align: center; transition: all .18s; cursor: pointer;
+}
+.dropzone.is-over { border-color: var(--accent); background: var(--accent-soft); }
+.dropzone-icon {
+  width: 48px; height: 48px; margin: 0 auto 14px;
+  display: grid; place-items: center; border-radius: 12px;
+  background: var(--bg-elev); border: 1px solid var(--border); color: var(--ink-2);
+}
+.dropzone h3 { margin: 0 0 6px; font-size: 15px; font-weight: 600; color: var(--ink); }
+.dropzone p  { margin: 0; font-size: 13px; color: var(--ink-3); }
+
+.btn {
+  appearance: none; border: 1px solid var(--border); background: var(--surface);
+  color: var(--ink); font-family: inherit; font-size: 13px; font-weight: 500;
+  padding: 8px 14px; border-radius: 8px; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 6px; transition: all .15s;
+}
+.btn:hover { border-color: var(--border-strong); background: var(--surface-hover); }
+.btn.primary { background: var(--ink); color: #fff; border-color: var(--ink); }
+.btn.primary:hover { background: #000; }
+.btn.ghost { border-color: transparent; background: transparent; color: var(--ink-3); }
+.btn.ghost:hover { background: var(--surface-hover); color: var(--ink); }
+.btn.sm { padding: 4px 10px; font-size: 12px; }
+
+.import-meta { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md); padding: 20px; }
+.import-meta h4 { margin: 0 0 14px; font-size: 13px; font-weight: 600; color: var(--ink); }
+.kv { display: grid; grid-template-columns: 110px 1fr; gap: 6px 12px; font-size: 13px; }
+.kv > dt { color: var(--ink-3); }
+.kv > dd { margin: 0; color: var(--ink); font-family: var(--font-mono); }
+
+.preview-table-wrap { margin-top: 20px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md); overflow: hidden; }
+.preview-table-wrap .panel-head { padding: 14px 22px; }
+.preview-scroll { overflow-x: auto; max-height: 460px; overflow-y: auto; }
+.preview-tbl { width: 100%; border-collapse: collapse; font-family: var(--font-mono); font-size: 12.5px; }
+.preview-tbl th, .preview-tbl td {
+  padding: 8px 14px; border-bottom: 1px solid var(--divider);
+  border-right: 1px solid var(--divider); white-space: nowrap; text-align: left;
+}
+.preview-tbl th { background: var(--bg-elev); font-family: var(--font-sans); font-weight: 500; font-size: 12px; color: var(--ink-3); letter-spacing: 0.02em; position: sticky; top: 0; }
+.preview-tbl td { color: var(--ink-2); }
+.preview-tbl .row-num { color: var(--ink-4); width: 40px; text-align: right; }
+
+.upload-history { margin-top: 20px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md); }
+.upload-history .panel-head { padding: 14px 22px; }
+.upload-history-list { list-style: none; margin: 0; padding: 0; }
+.upload-history-list li { display: flex; align-items: center; gap: 12px; padding: 12px 22px; border-bottom: 1px solid var(--divider); font-size: 13px; }
+.upload-history-list li:last-child { border-bottom: 0; }
+.upload-history-list .file-icon { width: 28px; height: 28px; border-radius: 6px; background: var(--pos-soft); color: var(--pos); display: grid; place-items: center; flex-shrink: 0; }
+.upload-history-list .file-name { color: var(--ink); font-weight: 500; }
+.upload-history-list .file-meta { color: var(--ink-4); font-family: var(--font-mono); font-size: 12px; }
+.upload-history-list .spacer { flex: 1; }
+
+/* Drag overlay hint */
+.drag-hint {
+  position: fixed; bottom: 28px; left: 50%; transform: translateX(-50%);
+  background: var(--ink); color: #fff; padding: 10px 16px; border-radius: 999px;
+  font-size: 12.5px; box-shadow: var(--shadow-pop);
+  display: flex; align-items: center; gap: 8px;
+  z-index: 50; opacity: 0; transition: opacity .2s, transform .2s; pointer-events: none;
+}
+.drag-hint.is-visible { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+.stack > * + * { margin-top: 20px; }
+
+/* Section drag */
+.section-wrap { position: relative; transition: opacity .15s, transform .15s, box-shadow .15s; }
+.section-wrap.is-dragging { opacity: 0.45; }
+.section-wrap.is-over::before {
+  content: ""; position: absolute; inset: -4px;
+  border: 2px dashed var(--accent); border-radius: calc(var(--r-md) + 4px);
+  pointer-events: none; background: var(--accent-soft); opacity: 0.4; z-index: 1;
+}
+.drag-handle {
+  appearance: none; border: 1px solid transparent; background: transparent;
+  color: var(--ink-4); width: 28px; height: 28px; border-radius: 6px;
+  display: inline-grid; place-items: center; cursor: grab; transition: all .15s;
+}
+.drag-handle:hover { border-color: var(--border); background: var(--bg-elev); color: var(--ink-2); }
+.drag-handle:active { cursor: grabbing; }
+
+/* Misc */
+.tag { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--accent-ink); font-size: 11.5px; font-weight: 500; font-family: var(--font-sans); letter-spacing: 0.01em; }
+.tag.success { background: var(--pos-soft); color: var(--pos); }
+.tag.danger  { background: var(--neg-soft); color: var(--neg); }
+
+.toast {
+  position: fixed; top: 84px; right: 32px;
+  background: var(--ink); color: #fff;
+  padding: 12px 18px; border-radius: 10px; font-size: 13px;
+  box-shadow: var(--shadow-pop); z-index: 100;
+  display: flex; align-items: center; gap: 10px;
+  opacity: 0; transform: translateY(-8px); transition: opacity .2s, transform .2s; pointer-events: none;
+}
+.toast.is-visible { opacity: 1; transform: translateY(0); pointer-events: auto; }
+.toast.success .toast-dot { background: var(--pos); }
+.toast .toast-dot { width: 8px; height: 8px; border-radius: 999px; background: var(--accent); }
+
+@media (max-width: 1100px) {
+  .metrics-grid { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 720px) {
+  .topbar-inner, .shell { padding-left: 16px; padding-right: 16px; }
+  .topbar-right { display: none; }
+}
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<!-- ============ DATA ============ -->
+<script type="text/babel">
+const METRIC_DEFS = [
+  { key: "sales",        label: "销售额",       format: "currency",    higherIsBetter: true  },
+  { key: "orders",       label: "订单量",       format: "int",         higherIsBetter: true  },
+  { key: "refundRate",   label: "退款率",       format: "percent",     higherIsBetter: false },
+  { key: "grossMargin",  label: "毛利率",       format: "percent",     higherIsBetter: true  },
+  { key: "profit",       label: "利润额",       format: "currency",    higherIsBetter: true  },
+  { key: "profitRate",   label: "利润率",       format: "percent",     higherIsBetter: true  },
+  { key: "shipPct",      label: "快递费用占比", format: "percent",     higherIsBetter: false },
+  { key: "adPct",        label: "营销费用占比", format: "percent",     higherIsBetter: false },
+];
+
+const DAILY = [
+  { date: "2026-05-01", sales: 1380.40,  orders: 642,  refundRate: 28.40, grossMargin: 82.10, profit:   120.00, profitRate:   8.70, shipPct: 10.90, adPct: 62.30 },
+  { date: "2026-05-02", sales: 2680.10,  orders: 813,  refundRate: 36.20, grossMargin: 79.40, profit:   -80.40, profitRate:  -3.10, shipPct: 11.40, adPct: 71.80 },
+  { date: "2026-05-03", sales: 2860.50,  orders: 875,  refundRate: 41.30, grossMargin: 76.20, profit:  -310.20, profitRate: -10.80, shipPct: 11.20, adPct: 78.50 },
+  { date: "2026-05-04", sales: 2740.00,  orders: 842,  refundRate: 38.90, grossMargin: 77.80, profit:  -210.60, profitRate:  -7.90, shipPct: 11.00, adPct: 74.10 },
+  { date: "2026-05-05", sales: 2738.60,  orders: 837,  refundRate: 33.40, grossMargin: 80.60, profit:   -60.90, profitRate:  -2.40, shipPct: 11.30, adPct: 70.20 },
+  { date: "2026-05-06", sales: 2018.20,  orders: 624,  refundRate: 32.10, grossMargin: 81.40, profit:   -10.10, profitRate:  -0.50, shipPct: 12.20, adPct: 66.90 },
+  { date: "2026-05-07", sales: 2810.70,  orders: 869,  refundRate: 39.80, grossMargin: 73.50, profit:  -420.70, profitRate: -14.90, shipPct: 11.90, adPct: 79.30 },
+  { date: "2026-05-08", sales: 2820.40,  orders: 873,  refundRate: 44.60, grossMargin: 64.80, profit:  -610.40, profitRate: -22.40, shipPct: 12.10, adPct: 86.00 },
+  { date: "2026-05-09", sales: 2055.80,  orders: 638,  refundRate: 45.10, grossMargin: 56.20, profit:  -880.60, profitRate: -42.80, shipPct: 11.80, adPct: 95.40 },
+  { date: "2026-05-10", sales: 2508.65,  orders: 772,  refundRate: 42.94, grossMargin: 50.33, profit: -1809.70, profitRate: -72.14, shipPct: 11.83, adPct:105.29 },
+];
+
+const PREV_PERIOD = {
+  sales: 2054.80, orders: 720, refundRate: 35.56, grossMargin: 77.95,
+  profit: -266.82, profitRate: -12.99, shipPct: 11.47, adPct: 72.61,
+};
+
+const DEFAULT_PANEL_ORDER = [
+  "sales", "orders", "refundRate", "grossMargin",
+  "profit", "profitRate", "shipPct", "adPct",
+];
+
+const CATEGORIES = [
+  { name: "家居家纺", sales: 942.30, profit: -421.2, orders: 286, grossMargin: 48.2, refundRate: 51.3 },
+  { name: "美妆个护", sales: 612.50, profit: -298.1, orders: 198, grossMargin: 53.6, refundRate: 38.4 },
+  { name: "服饰鞋包", sales: 481.85, profit: -512.6, orders: 152, grossMargin: 44.9, refundRate: 47.9 },
+  { name: "数码配件", sales: 286.40, profit: -341.0, orders:  82, grossMargin: 39.2, refundRate: 36.5 },
+  { name: "母婴玩具", sales: 185.60, profit: -236.8, orders:  54, grossMargin: 58.4, refundRate: 32.1 },
+];
+
+const SHOPS  = ["全部", "旗舰店 · 天猫", "旗舰店 · 京东", "专营店 · 抖音", "海外仓 · 速卖通"];
+const OWNERS = ["全部", "陈雨晴", "周明", "林婉", "Daniel Park"];
+const CATS   = ["全部", "家居家纺", "美妆个护", "服饰鞋包", "数码配件", "母婴玩具"];
+
+const UPLOAD_HISTORY = [
+  { name: "2026-05_交易明细.xlsx", size: "1.2 MB", rows: 4218, when: "2026-05-10 09:42" },
+  { name: "2026-05_退款流水.xlsx", size: "284 KB", rows:  812, when: "2026-05-10 09:43" },
+  { name: "2026-04_汇总_v2.xlsx",  size: "2.6 MB", rows: 9214, when: "2026-05-01 11:08" },
+];
+
+function formatValue(v, fmt) {
+  if (v === null || v === undefined || Number.isNaN(v)) return "—";
+  if (fmt === "currency") return v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  if (fmt === "percent")  return v.toFixed(2) + "%";
+  if (fmt === "int")      return Math.round(v).toLocaleString("en-US");
+  return String(v);
+}
+function formatDelta(curr, prev, higherIsBetter) {
+  if (prev === 0 && curr === 0) return { sign: "flat", text: "0.00%", arrow: "→" };
+  if (prev === 0) return { sign: "flat", text: "—", arrow: "→" };
+  const pct = ((curr - prev) / Math.abs(prev)) * 100;
+  if (Math.abs(pct) < 0.005) return { sign: "flat", text: "0.00%", arrow: "→" };
+  const isUp = pct > 0;
+  const good = higherIsBetter ? isUp : !isUp;
+  return {
+    sign: good ? "up" : "down",
+    text: (pct > 0 ? "+" : "") + pct.toFixed(2) + "%",
+    arrow: isUp ? "↑" : "↓",
+  };
+}
+
+Object.assign(window, { METRIC_DEFS, DAILY, PREV_PERIOD, DEFAULT_PANEL_ORDER, CATEGORIES, SHOPS, OWNERS, CATS, UPLOAD_HISTORY, formatValue, formatDelta });
+</script>
+
+<!-- ============ CHARTS ============ -->
+<script type="text/babel">
+const { useMemo } = React;
+
+function smoothPath(points, tension = 0.35) {
+  if (points.length < 2) return "";
+  let d = `M ${points[0].x} ${points[0].y}`;
+  for (let i = 0; i < points.length - 1; i++) {
+    const p0 = points[i - 1] || points[i];
+    const p1 = points[i];
+    const p2 = points[i + 1];
+    const p3 = points[i + 2] || p2;
+    const cp1x = p1.x + (p2.x - p0.x) * tension / 3;
+    const cp1y = p1.y + (p2.y - p0.y) * tension / 3;
+    const cp2x = p2.x - (p3.x - p1.x) * tension / 3;
+    const cp2y = p2.y - (p3.y - p1.y) * tension / 3;
+    d += ` C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${p2.x} ${p2.y}`;
+  }
+  return d;
+}
+
+function Sparkline({ values, trend, width = 220, height = 44 }) {
+  const path = useMemo(() => {
+    if (!values || values.length === 0) return { line: "", area: "" };
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    const span = max - min || 1;
+    const px = (i) => (i / (values.length - 1 || 1)) * (width - 4) + 2;
+    const py = (v) => height - 4 - ((v - min) / span) * (height - 8);
+    const pts = values.map((v, i) => ({ x: px(i), y: py(v) }));
+    if (Math.abs(span) < 1e-9) {
+      const y = height / 2;
+      return {
+        line: `M 2 ${y} L ${width - 2} ${y}`,
+        area: `M 2 ${y} L ${width - 2} ${y} L ${width - 2} ${height} L 2 ${height} Z`,
+      };
+    }
+    const line = smoothPath(pts);
+    const area = `${line} L ${pts[pts.length - 1].x} ${height} L ${pts[0].x} ${height} Z`;
+    return { line, area };
+  }, [values, width, height]);
+
+  const color = trend === "up" ? "var(--pos)" : trend === "down" ? "var(--neg)" : "var(--ink-4)";
+  const gid = `sg-${trend}-${Math.random().toString(36).slice(2, 8)}`;
+
+  return (
+    <svg viewBox={`0 0 ${width} ${height}`} width="100%" height={height} preserveAspectRatio="none" className="metric-spark">
+      <defs>
+        <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%"  stopColor={color} stopOpacity="0.18" />
+          <stop offset="100%" stopColor={color} stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      <path d={path.area} fill={`url(#${gid})`} />
+      <path d={path.line} fill="none" stroke={color} strokeWidth="1.6" strokeLinejoin="round" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function TrendChart({ data, valueKey, format, label }) {
+  const [hover, setHover] = React.useState(null);
+  const wrapRef = React.useRef(null);
+
+  const padL = 56, padR = 24, padT = 16, padB = 36;
+  const W = 1100, H = 320;
+  const innerW = W - padL - padR;
+  const innerH = H - padT - padB;
+
+  const values = data.map(d => d[valueKey]);
+  const minV = Math.min(...values, 0);
+  const maxV = Math.max(...values, 0);
+  const range = (maxV - minV) || 1;
+  const yMin = minV - range * 0.08;
+  const yMax = maxV + range * 0.12;
+
+  function niceTicks(min, max, count = 6) {
+    const span = max - min;
+    const rawStep = span / (count - 1);
+    const magnitude = Math.pow(10, Math.floor(Math.log10(rawStep)));
+    const norm = rawStep / magnitude;
+    let step;
+    if      (norm < 1.5) step = 1 * magnitude;
+    else if (norm < 3)   step = 2 * magnitude;
+    else if (norm < 7)   step = 5 * magnitude;
+    else                 step = 10 * magnitude;
+    const niceMin = Math.floor(min / step) * step;
+    const niceMax = Math.ceil(max / step) * step;
+    const ticks = [];
+    for (let v = niceMin; v <= niceMax + 1e-9; v += step) ticks.push(v);
+    return { ticks, niceMin, niceMax };
+  }
+  const { ticks, niceMin, niceMax } = niceTicks(yMin, yMax, 6);
+  const yScale = (v) => padT + innerH - ((v - niceMin) / (niceMax - niceMin || 1)) * innerH;
+  const xScale = (i) => padL + (i / (data.length - 1 || 1)) * innerW;
+
+  const pts = data.map((d, i) => ({ x: xScale(i), y: yScale(d[valueKey]) }));
+  const linePath = smoothPath(pts, 0.4);
+  const areaPath = `${linePath} L ${pts[pts.length - 1].x} ${padT + innerH} L ${pts[0].x} ${padT + innerH} Z`;
+
+  const accent = "var(--accent)";
+
+  const handleMove = (e) => {
+    if (!wrapRef.current) return;
+    const rect = wrapRef.current.getBoundingClientRect();
+    const xRel = ((e.clientX - rect.left) / rect.width) * W;
+    if (xRel < padL || xRel > W - padR) { setHover(null); return; }
+    let best = 0, bestDist = Infinity;
+    pts.forEach((p, i) => {
+      const d = Math.abs(p.x - xRel);
+      if (d < bestDist) { bestDist = d; best = i; }
+    });
+    setHover(best);
+  };
+  const handleLeave = () => setHover(null);
+
+  let tipLeft = 0, tipTop = 0;
+  if (hover !== null) {
+    const p = pts[hover];
+    tipLeft = (p.x / W) * 100;
+    tipTop  = (p.y / H) * 100;
+  }
+
+  const yfmt = (v) => {
+    if (format === "percent") return v.toFixed(0) + "%";
+    if (format === "int")     return Math.round(v).toLocaleString("en-US");
+    if (Math.abs(v) >= 1000)  return (v / 1000).toFixed(v % 1000 === 0 ? 0 : 1) + "k";
+    return v.toFixed(0);
+  };
+
+  return (
+    <div className="trend-wrap" ref={wrapRef} onMouseMove={handleMove} onMouseLeave={handleLeave}>
+      <svg className="trend-svg" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none">
+        <defs>
+          <linearGradient id="trend-fill" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%"  stopColor={accent} stopOpacity="0.18" />
+            <stop offset="100%" stopColor={accent} stopOpacity="0" />
+          </linearGradient>
+        </defs>
+        {ticks.map((t, i) => {
+          const y = yScale(t);
+          return (
+            <g key={i}>
+              <line x1={padL} x2={W - padR} y1={y} y2={y}
+                    stroke="var(--divider)" strokeWidth="1"
+                    strokeDasharray={t === 0 ? "0" : "3 4"} />
+              <text x={padL - 10} y={y + 4}
+                    fontSize="11" textAnchor="end" fill="var(--ink-4)"
+                    fontFamily="var(--font-mono)">{yfmt(t)}</text>
+            </g>
+          );
+        })}
+        {niceMin < 0 && niceMax > 0 && (
+          <line x1={padL} x2={W - padR} y1={yScale(0)} y2={yScale(0)}
+                stroke="var(--border-strong)" strokeWidth="1" />
+        )}
+        {data.map((d, i) => {
+          const show = data.length <= 10 || i % 2 === 0;
+          if (!show) return null;
+          return (
+            <text key={i} x={xScale(i)} y={H - 12}
+                  fontSize="11" textAnchor="middle" fill="var(--ink-4)"
+                  fontFamily="var(--font-mono)">{d.date}</text>
+          );
+        })}
+        <path d={areaPath} fill="url(#trend-fill)" />
+        <path d={linePath} fill="none" stroke={accent} strokeWidth="2"
+              strokeLinejoin="round" strokeLinecap="round" />
+        {pts.map((p, i) => (
+          <circle key={i} cx={p.x} cy={p.y} r={hover === i ? 5 : 3.5}
+                  fill="#fff" stroke={accent} strokeWidth="2" />
+        ))}
+        {hover !== null && (
+          <line x1={pts[hover].x} x2={pts[hover].x}
+                y1={padT} y2={padT + innerH}
+                stroke="var(--ink)" strokeOpacity="0.18" strokeWidth="1" strokeDasharray="3 4" />
+        )}
+      </svg>
+
+      {hover !== null && (
+        <div className="trend-tooltip is-visible" style={{ left: `${tipLeft}%`, top: `${tipTop}%` }}>
+          <span className="t-label">{label} · {data[hover].date}</span>
+          <strong>{window.formatValue(data[hover][valueKey], format)}</strong>
+        </div>
+      )}
+    </div>
+  );
+}
+
+Object.assign(window, { Sparkline, TrendChart, smoothPath });
+</script>
+
+<!-- ============ METRIC CARDS ============ -->
+<script type="text/babel">
+const { useState, useRef } = React;
+
+function HandleIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+      <circle cx="5" cy="3" r="1" fill="currentColor"/><circle cx="9" cy="3" r="1" fill="currentColor"/>
+      <circle cx="5" cy="7" r="1" fill="currentColor"/><circle cx="9" cy="7" r="1" fill="currentColor"/>
+      <circle cx="5" cy="11" r="1" fill="currentColor"/><circle cx="9" cy="11" r="1" fill="currentColor"/>
+    </svg>
+  );
+}
+
+function MetricCard({ def, value, prev, series, isActive, onClick, dragHandlers, dragState }) {
+  const delta = window.formatDelta(value, prev, def.higherIsBetter);
+  const trend = delta.sign;
+  const cls = [
+    "metric-card",
+    isActive ? "is-active" : "",
+    dragState === "dragging" ? "is-dragging" : "",
+    dragState === "over" ? "is-drop-target" : "",
+  ].filter(Boolean).join(" ");
+
+  return (
+    <div className={cls} draggable onClick={onClick}
+         onDragStart={dragHandlers.onDragStart}
+         onDragEnter={dragHandlers.onDragEnter}
+         onDragOver={dragHandlers.onDragOver}
+         onDragLeave={dragHandlers.onDragLeave}
+         onDrop={dragHandlers.onDrop}
+         onDragEnd={dragHandlers.onDragEnd}
+         role="button" tabIndex={0}>
+      <div>
+        <div className="metric-head">
+          <span className="metric-label">{def.label}</span>
+          <span className="metric-handle" title="拖动调整位置"><HandleIcon /></span>
+        </div>
+        <div className="metric-value-row">
+          <span className="metric-value">{window.formatValue(value, def.format)}</span>
+          <span className={`metric-delta ${trend}`}>
+            {delta.arrow}{delta.text === "—" ? "" : delta.text}
+          </span>
+        </div>
+        <div className="metric-prev">上期 {window.formatValue(prev, def.format)}</div>
+      </div>
+      <window.Sparkline values={series} trend={trend} />
+    </div>
+  );
+}
+
+function MetricGrid({ order, setOrder, activeKey, setActiveKey, daily, prev, onDragActive }) {
+  const dragIndex = useRef(null);
+  const [overIndex, setOverIndex] = useState(null);
+
+  const handleDragStart = (i) => (e) => {
+    dragIndex.current = i;
+    e.dataTransfer.effectAllowed = "move";
+    try { e.dataTransfer.setData("text/plain", String(i)); } catch (_) {}
+    onDragActive && onDragActive(true);
+  };
+  const handleDragEnter = (i) => (e) => {
+    e.preventDefault();
+    if (dragIndex.current === null || dragIndex.current === i) return;
+    setOverIndex(i);
+  };
+  const handleDragOver = (_i) => (e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; };
+  const handleDragLeave = () => () => {};
+  const handleDrop = (i) => (e) => {
+    e.preventDefault();
+    const from = dragIndex.current;
+    if (from === null || from === i) { reset(); return; }
+    const next = order.slice();
+    const [moved] = next.splice(from, 1);
+    next.splice(i, 0, moved);
+    setOrder(next);
+    reset();
+  };
+  const handleDragEnd = () => () => reset();
+  const reset = () => {
+    dragIndex.current = null;
+    setOverIndex(null);
+    onDragActive && onDragActive(false);
+  };
+
+  return (
+    <div className="metrics-grid">
+      {order.map((key, i) => {
+        const def = window.METRIC_DEFS.find(d => d.key === key);
+        if (!def) return null;
+        const value = daily[daily.length - 1][key];
+        const prevVal = prev[key];
+        const series = daily.map(d => d[key]);
+        const isDragging = dragIndex.current === i;
+        const isOver = overIndex === i && !isDragging;
+        return (
+          <MetricCard key={key} def={def} value={value} prev={prevVal} series={series}
+            isActive={activeKey === key} onClick={() => setActiveKey(key)}
+            dragState={isDragging ? "dragging" : isOver ? "over" : null}
+            dragHandlers={{
+              onDragStart: handleDragStart(i),
+              onDragEnter: handleDragEnter(i),
+              onDragOver:  handleDragOver(i),
+              onDragLeave: handleDragLeave(i),
+              onDrop:      handleDrop(i),
+              onDragEnd:   handleDragEnd(i),
+            }}/>
+        );
+      })}
+    </div>
+  );
+}
+
+Object.assign(window, { MetricGrid });
+</script>
+
+<!-- ============ TREND PANEL ============ -->
+<script type="text/babel">
+function TrendPanel({ daily, activeKey, setActiveKey, dragHandle }) {
+  const def = window.METRIC_DEFS.find(d => d.key === activeKey) || window.METRIC_DEFS[0];
+  return (
+    <section className="panel">
+      <header className="panel-head">
+        <span className="panel-title">{def.label}</span>
+        <span className="panel-subtitle">趋势</span>
+        <div className="panel-actions">
+          <button className="btn ghost sm">导出</button>
+          {dragHandle}
+        </div>
+      </header>
+      <div className="panel-body">
+        <div className="chip-row">
+          {window.METRIC_DEFS.map(m => (
+            <button key={m.key}
+                    className={`chip ${m.key === activeKey ? "is-active" : ""}`}
+                    onClick={() => setActiveKey(m.key)}>{m.label}</button>
+          ))}
+        </div>
+        <window.TrendChart data={daily} valueKey={activeKey} format={def.format} label={def.label}/>
+      </div>
+    </section>
+  );
+}
+Object.assign(window, { TrendPanel });
+</script>
+
+<!-- ============ CATEGORY TABLE ============ -->
+<script type="text/babel">
+const { useState: useTblState, useMemo: useTblMemo } = React;
+
+function CategoryTable({ rows, dragHandle }) {
+  const [sortKey, setSortKey] = useTblState("sales");
+  const [sortDir, setSortDir] = useTblState("desc");
+
+  const sorted = useTblMemo(() => {
+    const r = rows.slice();
+    r.sort((a, b) => {
+      const va = a[sortKey], vb = b[sortKey];
+      if (typeof va === "string") return sortDir === "asc" ? va.localeCompare(vb) : vb.localeCompare(va);
+      return sortDir === "asc" ? va - vb : vb - va;
+    });
+    return r;
+  }, [rows, sortKey, sortDir]);
+
+  const maxSales = Math.max(...rows.map(r => r.sales));
+
+  const head = (key, label, align = "right") => (
+    <th style={{ cursor: "pointer", textAlign: align }}
+        onClick={() => { if (sortKey === key) setSortDir(sortDir === "asc" ? "desc" : "asc"); else { setSortKey(key); setSortDir("desc"); } }}>
+      {label}
+      <span style={{ marginLeft: 6, color: "var(--ink-5)", fontFamily: "var(--font-mono)" }}>
+        {sortKey === key ? (sortDir === "asc" ? "↑" : "↓") : ""}
+      </span>
+    </th>
+  );
+
+  return (
+    <section className="panel">
+      <header className="panel-head">
+        <span className="panel-title">类目分类汇总</span>
+        <span className="panel-subtitle">按销售额排序 · 共 {rows.length} 项</span>
+        <div className="panel-actions">
+          <button className="btn ghost sm">导出 CSV</button>
+          {dragHandle}
+        </div>
+      </header>
+      <table className="tbl">
+        <thead>
+          <tr>
+            {head("name", "类目", "left")}
+            {head("sales", "销售额")}
+            {head("profit", "利润额")}
+            {head("orders", "订单量")}
+            {head("grossMargin", "毛利率")}
+            {head("refundRate", "退款率")}
+          </tr>
+        </thead>
+        <tbody>
+          {sorted.map((r, i) => (
+            <tr key={i}>
+              <td>{r.name}</td>
+              <td>
+                {window.formatValue(r.sales, "currency")}
+                <span className="t-bar"><i style={{ width: `${(r.sales / maxSales) * 100}%` }} /></span>
+              </td>
+              <td className={r.profit >= 0 ? "t-pos" : "t-neg"}>
+                {window.formatValue(r.profit, "currency")}
+              </td>
+              <td className="t-muted">{window.formatValue(r.orders, "int")}</td>
+              <td>{window.formatValue(r.grossMargin, "percent")}</td>
+              <td className={r.refundRate >= 40 ? "t-neg" : ""}>
+                {window.formatValue(r.refundRate, "percent")}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </section>
+  );
+}
+Object.assign(window, { CategoryTable });
+</script>
+
+<!-- ============ IMPORT VIEW ============ -->
+<script type="text/babel">
+const { useState: useImpState, useRef: useImpRef, useCallback } = React;
+
+function UploadIcon() {
+  return (
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+      <path d="M12 16V4M12 4L7 9M12 4L17 9" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/>
+      <path d="M4 16V19C4 19.5523 4.44772 20 5 20H19C19.5523 20 20 19.5523 20 19V16" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/>
+    </svg>
+  );
+}
+function FileIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+      <path d="M3 1.5H8L11 4.5V12.5C11 12.7761 10.7761 13 10.5 13H3C2.72386 13 2.5 12.7761 2.5 12.5V2C2.5 1.72386 2.72386 1.5 3 1.5Z" stroke="currentColor" strokeWidth="1.2"/>
+      <path d="M8 1.5V4.5H11" stroke="currentColor" strokeWidth="1.2"/>
+    </svg>
+  );
+}
+
+function ImportView({ toast }) {
+  const [isOver, setIsOver]   = useImpState(false);
+  const [parsed, setParsed]   = useImpState(null);
+  const [workbook, setWorkbook] = useImpState(null);
+  const inputRef = useImpRef(null);
+  const [busy, setBusy] = useImpState(false);
+
+  const handleFile = useCallback(async (file) => {
+    if (!file) return;
+    setBusy(true);
+    try {
+      const buf = await file.arrayBuffer();
+      const wb  = XLSX.read(buf, { type: "array", cellDates: true });
+      setWorkbook(wb);
+      const firstSheet = wb.SheetNames[0];
+      const ws = wb.Sheets[firstSheet];
+      const json = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
+      const [header = [], ...rows] = json;
+      setParsed({
+        name: file.name,
+        size: (file.size / 1024).toFixed(0) + " KB",
+        rows: rows.length,
+        columns: header,
+        data: rows,
+        sheetNames: wb.SheetNames,
+        activeSheet: firstSheet,
+        when: new Date().toLocaleString("zh-CN", { hour12: false }),
+      });
+      toast(`已解析 ${file.name} · ${rows.length} 行`);
+    } catch (err) {
+      console.error(err);
+      toast("文件解析失败：" + err.message, "error");
+    } finally {
+      setBusy(false);
+    }
+  }, [toast]);
+
+  const switchSheet = (name) => {
+    if (!workbook) return;
+    const ws = workbook.Sheets[name];
+    const json = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
+    const [header = [], ...rows] = json;
+    setParsed(p => ({ ...p, activeSheet: name, columns: header, data: rows, rows: rows.length }));
+  };
+
+  const onDrop = (e) => {
+    e.preventDefault();
+    setIsOver(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file) handleFile(file);
+  };
+
+  return (
+    <div className="stack">
+      <div className="import-wrap">
+        <div className={`dropzone ${isOver ? "is-over" : ""}`}
+             onDragOver={(e) => { e.preventDefault(); setIsOver(true); }}
+             onDragLeave={() => setIsOver(false)}
+             onDrop={onDrop}
+             onClick={() => inputRef.current?.click()}>
+          <div className="dropzone-icon"><UploadIcon /></div>
+          <h3>{busy ? "正在解析…" : "拖拽 Excel 至此处或点击选择"}</h3>
+          <p>支持 .xlsx / .xls / .csv · 单次最大 20MB · 首行作为表头</p>
+          <input ref={inputRef} type="file" accept=".xlsx,.xls,.csv"
+                 style={{ display: "none" }}
+                 onChange={(e) => handleFile(e.target.files?.[0])}/>
+        </div>
+
+        <aside className="import-meta">
+          <h4>导入要求</h4>
+          <dl className="kv">
+            <dt>必含字段</dt><dd>日期 / 店铺 / 类目 / 销售额 / 订单量</dd>
+            <dt>可选字段</dt><dd>退款额 / 成本 / 快递费 / 营销费</dd>
+            <dt>日期格式</dt><dd>YYYY-MM-DD</dd>
+            <dt>编码</dt><dd>UTF-8 / GBK 自动识别</dd>
+            <dt>解析方式</dt><dd>客户端 SheetJS</dd>
+          </dl>
+          <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid var(--divider)" }}>
+            <button className="btn sm" onClick={() => {
+              const ws = XLSX.utils.aoa_to_sheet([
+                ["日期", "店铺", "类目", "销售额", "订单量", "退款额", "成本", "快递费", "营销费"],
+                ["2026-05-10", "旗舰店 · 天猫", "家居家纺", 1280.50, 24, 80, 420, 38, 280],
+              ]);
+              const wb = XLSX.utils.book_new();
+              XLSX.utils.book_append_sheet(wb, ws, "示例");
+              XLSX.writeFile(wb, "导入模板.xlsx");
+            }}>下载模板</button>
+          </div>
+        </aside>
+      </div>
+
+      {parsed && (
+        <div className="preview-table-wrap">
+          <header className="panel-head">
+            <span className="panel-title">{parsed.name}</span>
+            <span className="panel-subtitle">{parsed.rows.toLocaleString()} 行 · {parsed.columns.length} 列 · {parsed.size}</span>
+            {parsed.sheetNames.length > 1 && (
+              <div className="panel-actions" style={{ marginLeft: 16 }}>
+                {parsed.sheetNames.map(n => (
+                  <button key={n} className={`chip ${parsed.activeSheet === n ? "is-active" : ""}`}
+                          onClick={() => switchSheet(n)}>{n}</button>
+                ))}
+              </div>
+            )}
+            <div className="panel-actions">
+              <button className="btn sm" onClick={() => { setParsed(null); setWorkbook(null); }}>移除</button>
+              <button className="btn primary sm" onClick={() => toast(`已应用 ${parsed.rows} 行至看板`, "success")}>应用到看板</button>
+            </div>
+          </header>
+          <div className="preview-scroll">
+            <table className="preview-tbl">
+              <thead>
+                <tr>
+                  <th className="row-num">#</th>
+                  {parsed.columns.map((c, i) => <th key={i}>{c || `列 ${i + 1}`}</th>)}
+                </tr>
+              </thead>
+              <tbody>
+                {parsed.data.slice(0, 200).map((row, ri) => (
+                  <tr key={ri}>
+                    <td className="row-num">{ri + 1}</td>
+                    {parsed.columns.map((_, ci) => {
+                      const v = row[ci];
+                      const display = v instanceof Date ? v.toISOString().slice(0, 10) : String(v ?? "");
+                      return <td key={ci}>{display}</td>;
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {parsed.data.length > 200 && (
+            <div style={{ padding: "10px 22px", color: "var(--ink-4)", fontSize: 12, borderTop: "1px solid var(--divider)" }}>
+              仅预览前 200 行，应用后将解析全部 {parsed.rows.toLocaleString()} 行。
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="upload-history">
+        <header className="panel-head">
+          <span className="panel-title">导入记录</span>
+          <span className="panel-subtitle">最近 30 天</span>
+        </header>
+        <ul className="upload-history-list">
+          {window.UPLOAD_HISTORY.map((h, i) => (
+            <li key={i}>
+              <span className="file-icon"><FileIcon /></span>
+              <span className="file-name">{h.name}</span>
+              <span className="spacer" />
+              <span className="file-meta">{h.rows.toLocaleString()} 行 · {h.size}</span>
+              <span className="file-meta" style={{ width: 140, textAlign: "right" }}>{h.when}</span>
+              <button className="btn ghost sm">查看</button>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </div>
+  );
+}
+Object.assign(window, { ImportView });
+</script>
+
+<!-- ============ APP ============ -->
+<script type="text/babel">
+const { useState: useAppState, useEffect } = React;
+
+const STORAGE_KEY = "dashboard.panel.order.v1";
+const ACTIVE_KEY  = "dashboard.active.metric.v1";
+const SECTION_KEY = "dashboard.section.order.v1";
+const DEFAULT_SECTIONS = ["trend", "categoryTable"];
+
+function GripIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+      <circle cx="5" cy="3"  r="1" fill="currentColor"/><circle cx="9" cy="3"  r="1" fill="currentColor"/>
+      <circle cx="5" cy="7"  r="1" fill="currentColor"/><circle cx="9" cy="7"  r="1" fill="currentColor"/>
+      <circle cx="5" cy="11" r="1" fill="currentColor"/><circle cx="9" cy="11" r="1" fill="currentColor"/>
+    </svg>
+  );
+}
+
+function DraggableSection({ index, dragIdx, overIdx, setDragIdx, setOverIdx, onReorder, onDragActive, children }) {
+  const [armed, setArmed] = React.useState(false);
+  const isDragging = dragIdx === index;
+  const isOver     = overIdx === index && dragIdx !== null && dragIdx !== index;
+
+  const handle = (
+    <button className="drag-handle" title="拖动调整面板顺序" aria-label="拖动调整面板顺序"
+            onMouseDown={() => setArmed(true)}
+            onMouseUp={() => setArmed(false)}
+            onMouseLeave={() => setArmed(false)}>
+      <GripIcon />
+    </button>
+  );
+
+  return (
+    <div
+      className={`section-wrap ${isDragging ? "is-dragging" : ""} ${isOver ? "is-over" : ""}`}
+      draggable={armed}
+      onDragStart={(e) => {
+        if (!armed) { e.preventDefault(); return; }
+        setDragIdx(index);
+        onDragActive && onDragActive(true);
+        e.dataTransfer.effectAllowed = "move";
+        try { e.dataTransfer.setData("text/plain", String(index)); } catch (_) {}
+      }}
+      onDragEnter={(e) => {
+        e.preventDefault();
+        if (dragIdx === null || dragIdx === index) return;
+        setOverIdx(index);
+      }}
+      onDragOver={(e) => { if (dragIdx !== null) e.preventDefault(); }}
+      onDrop={(e) => {
+        e.preventDefault();
+        if (dragIdx !== null && dragIdx !== index) onReorder(dragIdx, index);
+        setArmed(false); setDragIdx(null); setOverIdx(null);
+        onDragActive && onDragActive(false);
+      }}
+      onDragEnd={() => { setArmed(false); setDragIdx(null); setOverIdx(null); onDragActive && onDragActive(false); }}
+    >
+      {typeof children === "function" ? children(handle) : children}
+    </div>
+  );
+}
+
+function loadOrder() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return window.DEFAULT_PANEL_ORDER.slice();
+    const parsed = JSON.parse(raw);
+    const known = new Set(window.DEFAULT_PANEL_ORDER);
+    if (!Array.isArray(parsed) || parsed.length !== known.size) return window.DEFAULT_PANEL_ORDER.slice();
+    if (!parsed.every(k => known.has(k))) return window.DEFAULT_PANEL_ORDER.slice();
+    return parsed;
+  } catch (_) { return window.DEFAULT_PANEL_ORDER.slice(); }
+}
+function loadSectionOrder() {
+  try {
+    const raw = localStorage.getItem(SECTION_KEY);
+    if (!raw) return DEFAULT_SECTIONS.slice();
+    const parsed = JSON.parse(raw);
+    const known = new Set(DEFAULT_SECTIONS);
+    if (!Array.isArray(parsed) || parsed.length !== known.size) return DEFAULT_SECTIONS.slice();
+    if (!parsed.every(k => known.has(k))) return DEFAULT_SECTIONS.slice();
+    return parsed;
+  } catch (_) { return DEFAULT_SECTIONS.slice(); }
+}
+
+function App() {
+  const [view, setView]         = useAppState("dashboard");
+  const [order, setOrder]       = useAppState(loadOrder);
+  const [sectionOrder, setSectionOrder] = useAppState(loadSectionOrder);
+  const [secDragIdx, setSecDragIdx] = useAppState(null);
+  const [secOverIdx, setSecOverIdx] = useAppState(null);
+  const [activeKey, setActiveKey] = useAppState(() => localStorage.getItem(ACTIVE_KEY) || "sales");
+  const [granularity, setGranularity] = useAppState("day");
+  const [date, setDate]         = useAppState("2026-05-10");
+  const [shop, setShop]         = useAppState("全部");
+  const [owner, setOwner]       = useAppState("全部");
+  const [cat, setCat]           = useAppState("全部");
+  const [isDragging, setIsDragging] = useAppState(false);
+
+  const [toast, setToast]       = useAppState(null);
+  const showToast = (msg, kind = "success") => setToast({ msg, kind, id: Date.now() });
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 2400);
+    return () => clearTimeout(t);
+  }, [toast]);
+
+  useEffect(() => { localStorage.setItem(STORAGE_KEY, JSON.stringify(order)); }, [order]);
+  useEffect(() => { localStorage.setItem(SECTION_KEY, JSON.stringify(sectionOrder)); }, [sectionOrder]);
+  useEffect(() => { localStorage.setItem(ACTIVE_KEY, activeKey); }, [activeKey]);
+
+  const reorderSections = (from, to) => {
+    const next = sectionOrder.slice();
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    setSectionOrder(next);
+  };
+
+  const daily = window.DAILY;
+  const prev  = window.PREV_PERIOD;
+
+  const renderSection = (key, idx) => {
+    const common = {
+      index: idx, dragIdx: secDragIdx, overIdx: secOverIdx,
+      setDragIdx: setSecDragIdx, setOverIdx: setSecOverIdx,
+      onReorder: reorderSections, onDragActive: setIsDragging,
+    };
+    if (key === "trend") {
+      return (
+        <DraggableSection key="trend" {...common}>
+          {(handle) => (
+            <window.TrendPanel daily={daily} activeKey={activeKey}
+              setActiveKey={setActiveKey} dragHandle={handle}/>
+          )}
+        </DraggableSection>
+      );
+    }
+    if (key === "categoryTable") {
+      return (
+        <DraggableSection key="categoryTable" {...common}>
+          {(handle) => (<window.CategoryTable rows={window.CATEGORIES} dragHandle={handle}/>)}
+        </DraggableSection>
+      );
+    }
+    return null;
+  };
+
+  return (
+    <>
+      <header className="topbar">
+        <div className="topbar-inner">
+          <div className="brand">
+            <span className="brand-mark">EC</span>
+            <span className="brand-name">电商经营看板</span>
+            <span className="brand-tag">· v1.0</span>
+          </div>
+          <div className="tabs" role="tablist">
+            <button className={`tab ${view === "dashboard" ? "is-active" : ""}`}
+                    onClick={() => setView("dashboard")} role="tab">看板</button>
+            <button className={`tab ${view === "import" ? "is-active" : ""}`}
+                    onClick={() => setView("import")} role="tab">导入</button>
+          </div>
+          <div className="topbar-right">
+            <span className="status-dot" />
+            <span>数据更新于 09:42</span>
+            <span className="topbar-divider" />
+            <span className="mono">陈雨晴</span>
+          </div>
+        </div>
+      </header>
+
+      <main className="shell">
+        {view === "dashboard" ? (
+          <>
+            <div className="filter-row">
+              <div className="seg" role="tablist">
+                {[["day", "日"], ["week", "周"], ["month", "月"]].map(([k, l]) => (
+                  <button key={k} className={`seg-btn ${granularity === k ? "is-active" : ""}`}
+                          onClick={() => setGranularity(k)}>{l}</button>
+                ))}
+              </div>
+              <div className="filter-group">
+                <span className="filter-label">店铺</span>
+                <select className="select" value={shop} onChange={e => setShop(e.target.value)}>
+                  {window.SHOPS.map(s => <option key={s}>{s}</option>)}
+                </select>
+              </div>
+              <div className="filter-group">
+                <span className="filter-label">负责人</span>
+                <select className="select" value={owner} onChange={e => setOwner(e.target.value)}>
+                  {window.OWNERS.map(s => <option key={s}>{s}</option>)}
+                </select>
+              </div>
+              <div className="filter-group">
+                <span className="filter-label">类目</span>
+                <select className="select" value={cat} onChange={e => setCat(e.target.value)}>
+                  {window.CATS.map(s => <option key={s}>{s}</option>)}
+                </select>
+              </div>
+              <div className="spacer-x" />
+              <input type="date" className="date-input" value={date}
+                     onChange={e => setDate(e.target.value)}
+                     min="2024-01-01" max="2027-12-31"/>
+              <button className="btn" onClick={() => {
+                setOrder(window.DEFAULT_PANEL_ORDER.slice());
+                setSectionOrder(DEFAULT_SECTIONS.slice());
+                showToast("已重置面板顺序");
+              }}>重置布局</button>
+            </div>
+
+            <window.MetricGrid order={order} setOrder={setOrder}
+              activeKey={activeKey} setActiveKey={setActiveKey}
+              daily={daily} prev={prev} onDragActive={setIsDragging}/>
+
+            <div className="stack">
+              {sectionOrder.map((key, idx) => renderSection(key, idx))}
+            </div>
+          </>
+        ) : (
+          <window.ImportView toast={showToast} />
+        )}
+      </main>
+
+      <div className={`drag-hint ${isDragging ? "is-visible" : ""}`}>
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+          <circle cx="5" cy="3" r="1" fill="currentColor"/><circle cx="9" cy="3" r="1" fill="currentColor"/>
+          <circle cx="5" cy="7" r="1" fill="currentColor"/><circle cx="9" cy="7" r="1" fill="currentColor"/>
+          <circle cx="5" cy="11" r="1" fill="currentColor"/><circle cx="9" cy="11" r="1" fill="currentColor"/>
+        </svg>
+        松开以放置在此处
+      </div>
+
+      <div className={`toast ${toast ? "is-visible" : ""} ${toast?.kind || ""}`}>
+        <span className="toast-dot" />
+        <span>{toast?.msg}</span>
+      </div>
+    </>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>

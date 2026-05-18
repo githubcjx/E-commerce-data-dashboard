@@ -1,0 +1,51 @@
+/* Design tokens — sophisticated minimalism (ported from prototype) */
+:root {
+  --bg:           #F6F5F1;
+  --bg-elev:      #FBFAF7;
+  --surface:      #FFFFFF;
+  --surface-hover:#FAFAF6;
+  --border:       #E7E5DE;
+  --border-strong:#D4D2CA;
+  --divider:      #EFEDE6;
+
+  --ink:          #14140F;
+  --ink-2:        #3D3D36;
+  --ink-3:        #6F6E64;
+  --ink-4:        #97968B;
+  --ink-5:        #BDBCB1;
+
+  --accent:       oklch(54% 0.17 258);
+  --accent-soft:  oklch(96% 0.02 258);
+  --accent-ink:   oklch(38% 0.16 258);
+  --accent-line:  oklch(54% 0.17 258 / 0.18);
+
+  --pos:          oklch(54% 0.10 150);
+  --pos-soft:     oklch(96% 0.03 150);
+  --neg:          oklch(56% 0.16 30);
+  --neg-soft:     oklch(96% 0.03 30);
+
+  --font-sans:    "Manrope", -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", "Microsoft YaHei", sans-serif;
+  --font-mono:    "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 14px;
+
+  --shadow-1: 0 1px 0 rgba(20, 20, 15, 0.04), 0 1px 2px rgba(20, 20, 15, 0.03);
+  --shadow-2: 0 4px 14px -6px rgba(20, 20, 15, 0.10), 0 1px 0 rgba(20, 20, 15, 0.04);
+  --shadow-pop: 0 16px 40px -16px rgba(20, 20, 15, 0.20), 0 2px 4px rgba(20, 20, 15, 0.06);
+}
+
+* { box-sizing: border-box; }
+html, body, #app { margin: 0; padding: 0; }
+body {
+  font-family: var(--font-sans);
+  background: var(--bg);
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: "ss01", "cv11";
+  letter-spacing: -0.005em;
+}
+.mono { font-family: var(--font-mono); font-feature-settings: "tnum", "zero"; }

@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+.venv/
+__pycache__/
+*.pyc
+
+# Build output
+dist/
+frontend/dist/
+
+# Environment / secrets
+.env
+.env.local
+.env.*.local
+
+# Runtime / data
+*.db
+*.db-shm
+*.db-wal
+backend/uploads/
+backend/demo.db*
+
+# Reference archive (the unpacked design/ folder is in repo already)
+design.tar.gz
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.log
+
+# Tool-result temp files (Claude harness)
+*.bin
+.claude/
