@@ -83,32 +83,32 @@ class SalesRecord(Base):
 
     order_qty: Mapped[int] = mapped_column(Integer, default=0)
 
-    pre_ship_refund_rate: Mapped[Decimal] = mapped_column(Numeric(10, 6), default=0)
+    pre_ship_refund_rate: Mapped[Decimal] = mapped_column(Numeric(20, 6), default=0)
     post_ship_refund_amt: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=0)
     post_ship_platform_subsidy: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=0)
-    post_ship_refund_rate: Mapped[Decimal] = mapped_column(Numeric(10, 6), default=0)
+    post_ship_refund_rate: Mapped[Decimal] = mapped_column(Numeric(20, 6), default=0)
 
     actual_income: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=0)
     refund_total: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=0)
-    refund_rate: Mapped[Decimal] = mapped_column(Numeric(10, 6), default=0)
+    refund_rate: Mapped[Decimal] = mapped_column(Numeric(20, 6), default=0)
     income_total: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=0)
 
     material_cost: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=0)
-    material_cost_rate: Mapped[Decimal] = mapped_column(Numeric(10, 6), default=0)
+    material_cost_rate: Mapped[Decimal] = mapped_column(Numeric(20, 6), default=0)
     cost_total: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=0)
 
     gift_cost: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=0)
-    gift_cost_rate: Mapped[Decimal] = mapped_column(Numeric(10, 6), default=0)
-    gross_margin: Mapped[Decimal] = mapped_column(Numeric(10, 6), default=0)
+    gift_cost_rate: Mapped[Decimal] = mapped_column(Numeric(20, 6), default=0)
+    gross_margin: Mapped[Decimal] = mapped_column(Numeric(20, 6), default=0)
     marketing_cost: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=0)
-    marketing_cost_rate: Mapped[Decimal] = mapped_column(Numeric(10, 6), default=0)
+    marketing_cost_rate: Mapped[Decimal] = mapped_column(Numeric(20, 6), default=0)
     shipping_cost: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=0)
-    shipping_cost_rate: Mapped[Decimal] = mapped_column(Numeric(10, 6), default=0)
+    shipping_cost_rate: Mapped[Decimal] = mapped_column(Numeric(20, 6), default=0)
     platform_cost: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=0)
-    platform_cost_rate: Mapped[Decimal] = mapped_column(Numeric(10, 6), default=0)
+    platform_cost_rate: Mapped[Decimal] = mapped_column(Numeric(20, 6), default=0)
 
     profit: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=0)
-    profit_rate: Mapped[Decimal] = mapped_column(Numeric(10, 6), default=0)
+    profit_rate: Mapped[Decimal] = mapped_column(Numeric(20, 6), default=0)
 
     batch_id: Mapped[str | None] = mapped_column(String(64), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
