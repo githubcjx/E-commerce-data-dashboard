@@ -1,6 +1,8 @@
-# 生产部署手册（阿里云 Ubuntu 22.04）
+# 生产部署手册
 
 > 一行命令把整套系统跑起来。包含 PostgreSQL、后端、前端、Caddy 自动 HTTPS、防火墙、备份。
+>
+> **支持的发行版**：Ubuntu 22.04 / Debian 11+ / **Alibaba Cloud Linux 3** / Anolis OS / CentOS 7+ / Rocky / AlmaLinux / RHEL
 
 ## 0. 一键部署 TL;DR
 

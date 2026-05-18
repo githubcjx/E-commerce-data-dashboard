@@ -28,7 +28,9 @@ services:
       - "443:443"
       - "443:443/udp"   # HTTP/3
     volumes:
-      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # `:Z` relabels the file for SELinux (enforced on Alibaba Cloud Linux / Anolis).
+      # On systems without SELinux the suffix is silently ignored.
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro,Z
       - caddy_data:/data
       - caddy_config:/config
     environment:
