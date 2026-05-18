@@ -35,8 +35,11 @@ services:
     build: ./frontend
     depends_on:
       - backend
+    # Bind to loopback only so prod's Caddy can claim host :80. For local
+    # docker-only testing visit http://127.0.0.1:8080 . In prod Caddy reaches
+    # this container via the docker network (`frontend:80`) regardless.
     ports:
-      - "80:80"
+      - "127.0.0.1:8080:80"
     restart: unless-stopped
 
 volumes:
