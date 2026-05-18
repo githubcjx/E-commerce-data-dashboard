@@ -1,7 +1,13 @@
 FROM node:20-alpine AS build
 WORKDIR /app
-COPY package.json ./
-RUN npm install --no-audit --no-fund
+
+# China-friendly default; override at build with --build-arg NPM_REGISTRY=...
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+
+COPY package.json package-lock.json ./
+RUN npm config set registry "$NPM_REGISTRY" \
+ && npm ci --no-audit --no-fund
+
 COPY index.html vite.config.js ./
 COPY src ./src
 RUN npm run build
