@@ -9,13 +9,22 @@
 
 UI 采用设计稿 `design/untitled/project/` 中的「sophisticated minimalism」风格（米白底 + 靛蓝主色 + 等宽数字），所有 CSS 设计 token 已迁移至 `frontend/src/styles/`。
 
-## 快速启动
+## 快速启动（本地开发）
 
 ```bash
 cp .env.example .env
+# 编辑 .env 改 PLATFORM_ADMIN_PASSWORD 与 JWT_SECRET
 docker compose up -d --build
 # 浏览器访问 http://localhost
-# 默认团队密码：ec2026（在 .env 中修改 TEAM_PASSWORD）
+# 用 cjx + 你在 .env 中设置的密码登录
+```
+
+## 生产部署（阿里云 / Ubuntu 22.04）
+
+一行命令搞定 Docker / 防火墙 / HTTPS / 自动备份。详见 [`deploy/README.md`](deploy/README.md)：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/githubcjx/E-commerce-data-dashboard/main/deploy/install.sh | sudo bash
 ```
 
 ## 本地开发

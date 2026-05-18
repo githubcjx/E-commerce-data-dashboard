@@ -1,0 +1,29 @@
+# Production reverse proxy — Caddy 2
+#
+# SITE_ADDRESS is injected by docker-compose (from .env):
+#   - "your-domain.com"  → Caddy auto-provisions a Let's Encrypt cert
+#   - ":80"              → HTTP-only (use when no domain is set up yet)
+#
+{$SITE_ADDRESS} {
+    encode gzip
+
+    # Don't log healthcheck noise
+    log {
+        output stdout
+        format console
+    }
+
+    # API → FastAPI backend
+    handle /api/* {
+        reverse_proxy backend:8000 {
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    # Everything else → frontend nginx (SPA + static assets, has its own SPA fallback)
+    handle {
+        reverse_proxy frontend:80
+    }
+}

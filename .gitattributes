@@ -1,0 +1,11 @@
+# Keep shell scripts as LF so they run on Linux servers even when authored on Windows.
+*.sh           text eol=lf
+deploy/install.sh text eol=lf
+deploy/backup.sh  text eol=lf
+deploy/Caddyfile  text eol=lf
+
+# Docker / yaml / configs are line-ending-safe but LF is conventional
+*.yml          text eol=lf
+*.yaml         text eol=lf
+Dockerfile     text eol=lf
+*.conf         text eol=lf
