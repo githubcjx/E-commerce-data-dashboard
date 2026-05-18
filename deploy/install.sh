@@ -124,6 +124,33 @@ if ! docker compose version &>/dev/null; then
 fi
 ok "$(docker compose version)"
 
+# ---- 2.5 Docker registry mirrors (mandatory in China) ----
+# Without these, pulling from registry-1.docker.io times out on most servers
+# hosted in mainland China. Users with their own Aliyun personal mirror can
+# edit /etc/docker/daemon.json afterwards — we only set defaults if the file
+# isn't already there.
+if [ ! -f /etc/docker/daemon.json ]; then
+    log "配置 Docker 镜像加速器（公共镜像，国内拉镜像不再超时）..."
+    mkdir -p /etc/docker
+    cat > /etc/docker/daemon.json <<'JSON'
+{
+    "registry-mirrors": [
+        "https://docker.m.daocloud.io",
+        "https://dockerhub.icu",
+        "https://docker.1panel.live",
+        "https://hub.rat.dev"
+    ]
+}
+JSON
+    systemctl restart docker
+    sleep 2
+    ok "镜像加速器已配置"
+    warn "如果以上 4 个镜像都被墙，建议替换为阿里云个人加速器："
+    warn "    https://cr.console.aliyun.com/cn-hangzhou/instances/mirrors"
+else
+    ok "/etc/docker/daemon.json 已存在，跳过镜像加速配置"
+fi
+
 # ---- 3. firewall ----
 log "配置 $FW 开放 22 / 80 / 443..."
 case "$FW" in
