@@ -248,6 +248,12 @@ for i in {1..60}; do
     sleep 2
 done
 
+# ---- 8b. backup cron ----
+if [ -x "$INSTALL_DIR/deploy/setup-cron.sh" ]; then
+    log "注册每日 03:00 自动备份..."
+    bash "$INSTALL_DIR/deploy/setup-cron.sh" || warn "备份 cron 安装失败，可稍后手动跑 deploy/setup-cron.sh"
+fi
+
 # ---- 9. summary ----
 SITE_ADDR=$(grep ^SITE_ADDRESS .env | cut -d= -f2)
 ADMIN_USER=$(grep ^PLATFORM_ADMIN_USERNAME .env | cut -d= -f2)
