@@ -172,8 +172,15 @@ def parse_workbook(path: str | Path, stats: dict | None = None) -> Iterator[dict
     the caller can tell the user how many rows were dropped and why. Keys:
       - scanned       : rows that had at least one non-empty cell
       - skipped_empty : rows where every cell was blank
-      - skipped_no_keys : rows missing shop_code / date / sku
+      - skipped_no_keys : rows missing shop_code or date
       - skipped_bad_date : rows whose date cell couldn't be parsed
+
+    Note on sku:
+      The 分类 column maps to `sku`. In real exports "其它"-category rows have
+      no sub-classification and 分类 is blank — but those rows are still valid
+      data, not subtotals. We normalize empty sku to "(未分类)" so the
+      (tenant, shop, date, sku) unique key stays well-defined; the dashboard
+      doesn't surface raw sku anywhere so the sentinel is invisible to users.
     """
     if stats is not None:
         stats.setdefault("scanned", 0)
@@ -227,10 +234,14 @@ def parse_workbook(path: str | Path, stats: dict | None = None) -> Iterator[dict
                 if stats is not None:
                     stats["skipped_bad_date"] += 1
                 continue
-            if not rec.get("shop_code") or not rec.get("date") or not rec.get("sku"):
+            # shop_code and date are truly required; sku may be blank for
+            # "其它"-category rows that have no sub-classification — keep them.
+            if not rec.get("shop_code") or not rec.get("date"):
                 if stats is not None:
                     stats["skipped_no_keys"] += 1
                 continue
+            if not rec.get("sku"):
+                rec["sku"] = "(未分类)"
             yield rec
     finally:
         wb.close()
