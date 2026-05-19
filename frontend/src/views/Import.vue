@@ -93,7 +93,14 @@ function pollBatch(id) {
         loadingMsg.value = "";
         refreshHistory();
         if (b.status === "success") {
-          ui.showToast(`导入完成 · 新增 ${b.inserted_rows} / 更新 ${b.updated_rows}`, "success");
+          // Soft-skipped rows (parser-level) still show as success but include
+          // a breakdown so the user can spot a total-vs-imported gap.
+          const skipped = b.failed_rows || 0;
+          const suffix = skipped ? ` · 跳过 ${skipped}（${b.error_message || ""}）` : "";
+          ui.showToast(
+            `导入完成 · 新增 ${b.inserted_rows} / 更新 ${b.updated_rows} / 总 ${b.total_rows}${suffix}`,
+            skipped ? "warning" : "success"
+          );
         } else {
           ui.showToast("导入失败：" + (b.error_message || "未知错误"), "error");
         }
@@ -206,7 +213,11 @@ onMounted(refreshHistory);
             {{ h.status === "processing" ? "处理中" : h.status === "success" ? "成功" : "失败" }}
           </span>
           <span class="spacer" />
-          <span class="file-meta">新增 {{ h.inserted_rows }} · 更新 {{ h.updated_rows }} · 总 {{ h.total_rows }}</span>
+          <span class="file-meta" :title="h.error_message || ''">
+            新增 {{ h.inserted_rows }} · 更新 {{ h.updated_rows }}
+            <template v-if="h.failed_rows"> · 跳过 {{ h.failed_rows }}</template>
+            · 总 {{ h.total_rows }}
+          </span>
           <span class="file-meta" style="width:160px;text-align:right">{{ new Date(h.created_at).toLocaleString("zh-CN", { hour12: false }) }}</span>
           <button class="btn ghost sm" @click="rollback(h.id)" :disabled="h.status === 'processing' || isBusy">回滚</button>
         </li>

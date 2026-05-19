@@ -138,6 +138,14 @@ def _parse_date(v) -> date | None:
         return v.date()
     if isinstance(v, date):
         return v
+    # Excel serial date: cells with General format containing a date come through
+    # as float (days since 1899-12-30, ignoring Excel's 1900 leap-year bug).
+    if isinstance(v, (int, float)) and 0 < v < 200000:
+        try:
+            from datetime import timedelta
+            return (datetime(1899, 12, 30) + timedelta(days=float(v))).date()
+        except (OverflowError, ValueError):
+            return None
     s = _clean_str(v)
     for pat in _DATE_PATTERNS:
         m = pat.match(s)
@@ -155,11 +163,24 @@ def _normalize_category(v: str) -> str:
     return s.replace("其它", "其他") if s else s
 
 
-def parse_workbook(path: str | Path) -> Iterator[dict]:
+def parse_workbook(path: str | Path, stats: dict | None = None) -> Iterator[dict]:
     """Stream rows from the first sheet of an xlsx file.
 
     Yields dicts with cleaned & typed field values.
+
+    If `stats` is provided, the parser records per-row skip reasons into it so
+    the caller can tell the user how many rows were dropped and why. Keys:
+      - scanned       : rows that had at least one non-empty cell
+      - skipped_empty : rows where every cell was blank
+      - skipped_no_keys : rows missing shop_code / date / sku
+      - skipped_bad_date : rows whose date cell couldn't be parsed
     """
+    if stats is not None:
+        stats.setdefault("scanned", 0)
+        stats.setdefault("skipped_empty", 0)
+        stats.setdefault("skipped_no_keys", 0)
+        stats.setdefault("skipped_bad_date", 0)
+
     wb = load_workbook(filename=str(path), read_only=True, data_only=True)
     try:
         ws = wb.active
@@ -176,12 +197,18 @@ def parse_workbook(path: str | Path) -> Iterator[dict]:
                 col_idx[COLUMN_MAP[key]] = i
 
         for row in rows:
-            if not row:
+            if not row or all(v is None or v == "" for v in row):
+                if stats is not None:
+                    stats["skipped_empty"] += 1
                 continue
+            if stats is not None:
+                stats["scanned"] += 1
             rec: dict = {}
+            date_raw = None
             for field, idx in col_idx.items():
                 raw = row[idx] if idx < len(row) else None
                 if field == "date":
+                    date_raw = raw
                     rec[field] = _parse_date(raw)
                 elif field == "category":
                     rec[field] = _normalize_category(raw)
@@ -195,8 +222,14 @@ def parse_workbook(path: str | Path) -> Iterator[dict]:
                     rec[field] = _parse_number(raw)
                 else:
                     rec[field] = raw
-            # Required keys check
+            # Distinguish "date cell had content but unparseable" from "all keys missing".
+            if rec.get("date") is None and date_raw not in (None, ""):
+                if stats is not None:
+                    stats["skipped_bad_date"] += 1
+                continue
             if not rec.get("shop_code") or not rec.get("date") or not rec.get("sku"):
+                if stats is not None:
+                    stats["skipped_no_keys"] += 1
                 continue
             yield rec
     finally:

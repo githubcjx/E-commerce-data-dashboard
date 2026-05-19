@@ -4,6 +4,14 @@ Per-tenant isolation: every query filters `SalesRecord.tenant_id == tenant_id`,
 so members of one company share their data pool but can never see another
 company's rows. Role within the tenant (admin vs user) doesn't affect what data
 is visible — only who can manage users.
+
+Performance note: KPI + trend rendering originally fired one SUM() query per
+trend bucket (10 days / 12 weeks / 12 months) plus current+previous — 12-14
+serial round-trips for `/kpi` and another 10-12 for `/trend`. On a small VPS
+that adds up to 30+ seconds. The current implementation pulls a single
+`GROUP BY date` slice covering the full span the page needs (one query for
+KPIs, one for the standalone trend endpoint) and folds it into buckets in
+Python. ix_sales_tenant_date already covers the predicate.
 """
 from __future__ import annotations
 
@@ -33,6 +41,17 @@ METRIC_DEFS: list[MetricDef] = [
     MetricDef("shipPct", "快递费用占比", "percent", False),
     MetricDef("adPct", "营销费用占比", "percent", False),
 ]
+
+# Columns we pull (and sum) once per page render — every KPI derives from these.
+_AGG_COLS = (
+    "income_total",
+    "actual_income",
+    "refund_total",
+    "cost_total",
+    "profit",
+    "shipping_cost",
+    "marketing_cost",
+)
 
 
 def _period_range(end_date: date, granularity: str) -> tuple[date, date]:
@@ -119,7 +138,7 @@ def _apply_filters(stmt, tenant_id: int, shop_code: str | None, owner: str | Non
     return stmt
 
 
-async def _aggregate(
+async def _daily_aggregates(
     session: AsyncSession,
     tenant_id: int,
     start: date,
@@ -127,16 +146,14 @@ async def _aggregate(
     shop_code: str | None,
     owner: str | None,
     category: str | None,
-) -> dict[str, float]:
-    """Aggregate raw rows in [start, end] into the 8 KPIs.
-
-    Conventions matched to the real 数据源.xlsx:
-    - "销售额" = sum(收入-收入总额) — gross merchandise value (GMV).
-      In real exports `收入-实收金额` is often blank, so we never use it as
-      the sales base; income_total is the canonical gross.
-    - All rate denominators (退款率/毛利率/利润率/快递占比/营销占比) are GMV.
+) -> dict[date, dict[str, float]]:
+    """One query per call: GROUP BY date over [start, end] and return a
+    `{date: {col: float}}` dict the caller can re-bucket cheaply in Python.
     """
+    if start > end:
+        return {}
     cols = (
+        SalesRecord.date,
         func.coalesce(func.sum(SalesRecord.income_total), 0).label("income_total"),
         func.coalesce(func.sum(SalesRecord.actual_income), 0).label("actual_income"),
         func.coalesce(func.sum(SalesRecord.refund_total), 0).label("refund_total"),
@@ -146,30 +163,49 @@ async def _aggregate(
         func.coalesce(func.sum(SalesRecord.marketing_cost), 0).label("marketing_cost"),
     )
     stmt = select(*cols).where(and_(SalesRecord.date >= start, SalesRecord.date <= end))
-    stmt = _apply_filters(stmt, tenant_id, shop_code, owner, category)
-    row = (await session.execute(stmt)).one()
+    stmt = _apply_filters(stmt, tenant_id, shop_code, owner, category).group_by(SalesRecord.date)
+    rows = (await session.execute(stmt)).all()
+    return {
+        r.date: {col: float(getattr(r, col) or 0) for col in _AGG_COLS}
+        for r in rows
+    }
 
-    income_total = float(row.income_total or 0)
-    actual_income = float(row.actual_income or 0)
-    # Fall back to actual_income only when income_total really is zero (e.g. a
-    # source file that ships net revenue instead of gross). Real-world default
-    # is income_total.
-    gmv = income_total if income_total else actual_income
-    cost_total = float(row.cost_total or 0)
-    refund_total = float(row.refund_total or 0)
-    profit = float(row.profit or 0)
+
+def _sum_range(daily: dict[date, dict[str, float]], start: date, end: date) -> dict[str, float]:
+    """Sum the daily rows that fall within [start, end]."""
+    out = {col: 0.0 for col in _AGG_COLS}
+    if start > end:
+        return out
+    # date keys are sparse — iterating dict is O(N_days_with_data), fine for
+    # any plausible page span.
+    for d, vals in daily.items():
+        if start <= d <= end:
+            for col in _AGG_COLS:
+                out[col] += vals[col]
+    return out
+
+
+def _kpis_from_sums(sums: dict[str, float]) -> dict[str, float]:
+    """Convention: sales = income_total (GMV); fall back to actual_income only
+    when income_total is literally zero. All percentage metrics use GMV as the
+    denominator.
+    """
+    gmv = sums["income_total"] or sums["actual_income"]
+    cost = sums["cost_total"]
+    profit = sums["profit"]
+    refund = sums["refund_total"]
 
     def pct(num: float, den: float) -> float:
         return (num / den * 100) if den else 0.0
 
     return {
         "sales": gmv,
-        "refundRate": pct(refund_total, gmv),
-        "grossMargin": pct(gmv - cost_total, gmv),
+        "refundRate": pct(refund, gmv),
+        "grossMargin": pct(gmv - cost, gmv),
         "profit": profit,
         "profitRate": pct(profit, gmv),
-        "shipPct": pct(float(row.shipping_cost or 0), gmv),
-        "adPct": pct(float(row.marketing_cost or 0), gmv),
+        "shipPct": pct(sums["shipping_cost"], gmv),
+        "adPct": pct(sums["marketing_cost"], gmv),
     }
 
 
@@ -182,24 +218,33 @@ def _delta_pct(curr: float, prev: float) -> float | None:
 async def get_kpis(session, tenant_id, end_date, granularity, shop_code, owner, category):
     cur_start, cur_end = _period_range(end_date, granularity)
     prev_start, prev_end = _previous_range(cur_start, cur_end, granularity)
-    curr = await _aggregate(session, tenant_id, cur_start, cur_end, shop_code, owner, category)
-    prev = await _aggregate(session, tenant_id, prev_start, prev_end, shop_code, owner, category)
-
     trend_ranges = _trend_dates(end_date, granularity)
+
+    # Single date span covering current + previous + every trend bucket. One
+    # SQL round-trip replaces the previous 12-14.
+    span_start = min(prev_start, cur_start, min(s for s, _, _ in trend_ranges))
+    span_end = max(prev_end, cur_end, max(e for _, e, _ in trend_ranges))
+    daily = await _daily_aggregates(
+        session, tenant_id, span_start, span_end, shop_code, owner, category
+    )
+
+    curr_kpi = _kpis_from_sums(_sum_range(daily, cur_start, cur_end))
+    prev_kpi = _kpis_from_sums(_sum_range(daily, prev_start, prev_end))
+
     series_by_metric: dict[str, list[float]] = {m.key: [] for m in METRIC_DEFS}
     for s, e, _label in trend_ranges:
-        agg = await _aggregate(session, tenant_id, s, e, shop_code, owner, category)
+        bucket_kpi = _kpis_from_sums(_sum_range(daily, s, e))
         for m in METRIC_DEFS:
-            series_by_metric[m.key].append(agg[m.key])
+            series_by_metric[m.key].append(bucket_kpi[m.key])
 
     items = []
     for m in METRIC_DEFS:
         items.append({
             "key": m.key,
             "label": m.label,
-            "value": curr[m.key],
-            "prev": prev[m.key],
-            "delta_pct": _delta_pct(curr[m.key], prev[m.key]),
+            "value": curr_kpi[m.key],
+            "prev": prev_kpi[m.key],
+            "delta_pct": _delta_pct(curr_kpi[m.key], prev_kpi[m.key]),
             "higher_is_better": m.higher_is_better,
             "format": m.format,
             "series": series_by_metric[m.key],
@@ -211,10 +256,19 @@ async def get_trend(session, tenant_id, end_date, granularity, metric, shop_code
     if metric not in {m.key for m in METRIC_DEFS}:
         metric = "sales"
     ranges = _trend_dates(end_date, granularity)
+    if not ranges:
+        return {"metric": metric, "points": []}
+
+    span_start = min(s for s, _, _ in ranges)
+    span_end = max(e for _, e, _ in ranges)
+    daily = await _daily_aggregates(
+        session, tenant_id, span_start, span_end, shop_code, owner, category
+    )
+
     points = []
     for s, e, label in ranges:
-        agg = await _aggregate(session, tenant_id, s, e, shop_code, owner, category)
-        points.append({"date": label, "value": agg[metric]})
+        bucket_kpi = _kpis_from_sums(_sum_range(daily, s, e))
+        points.append({"date": label, "value": bucket_kpi[metric]})
     return {"metric": metric, "points": points}
 
 

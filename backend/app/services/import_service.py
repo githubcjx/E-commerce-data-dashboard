@@ -25,21 +25,33 @@ BATCH_SIZE = 1000
 
 async def run_import(batch_id: str, file_path: str, tenant_id: int) -> None:
     """Background task: parse the file and upsert records scoped to `tenant_id`."""
-    inserted = updated = failed = total = 0
+    inserted = updated = 0
+    crashed = False
     error_msg: str | None = None
+    parse_stats: dict[str, int] = {}
+    # Track conflict keys within the current un-flushed buffer; if the same
+    # (tenant, shop, date, sku) appears again we overwrite the earlier entry
+    # to keep last-write-wins. Without this, PG raises
+    # "ON CONFLICT DO UPDATE command cannot affect row a second time".
+    seen_keys: dict[tuple, int] = {}
     try:
         async with SessionLocal() as session:
             buffer: list[dict] = []
-            for rec in parse_workbook(file_path):
+            for rec in parse_workbook(file_path, stats=parse_stats):
                 rec["batch_id"] = batch_id
                 rec["tenant_id"] = tenant_id
+                key = (tenant_id, rec["shop_code"], rec["date"], rec["sku"])
+                if key in seen_keys:
+                    buffer[seen_keys[key]] = rec
+                    continue
+                seen_keys[key] = len(buffer)
                 buffer.append(rec)
-                total += 1
                 if len(buffer) >= BATCH_SIZE:
                     ins, upd = await _upsert(session, buffer)
                     inserted += ins
                     updated += upd
                     buffer.clear()
+                    seen_keys.clear()
             if buffer:
                 ins, upd = await _upsert(session, buffer)
                 inserted += ins
@@ -47,19 +59,41 @@ async def run_import(batch_id: str, file_path: str, tenant_id: int) -> None:
             await session.commit()
     except Exception as exc:  # noqa: BLE001
         log.exception("Import failed: %s", exc)
+        crashed = True
         error_msg = str(exc)[:1900]
-        failed = total
+
+    # Soft-skipped rows: parser saw them but they're unusable. Surface to user.
+    skipped_no_keys = parse_stats.get("skipped_no_keys", 0)
+    skipped_bad_date = parse_stats.get("skipped_bad_date", 0)
+    skipped = skipped_no_keys + skipped_bad_date
+
+    scanned = parse_stats.get("scanned", inserted + updated + skipped)
+
+    if crashed:
+        # On crash, count everything we tried to import as failed.
+        failed = scanned
+        status = "failed"
+    else:
+        failed = skipped
+        status = "success"
+        if skipped:
+            parts = []
+            if skipped_no_keys:
+                parts.append(f"缺少 店铺编码/日期/分类 {skipped_no_keys} 行")
+            if skipped_bad_date:
+                parts.append(f"日期无法识别 {skipped_bad_date} 行")
+            error_msg = "已跳过：" + "；".join(parts)
 
     async with SessionLocal() as session:
         await session.execute(
             update(ImportBatch)
             .where(ImportBatch.id == batch_id)
             .values(
-                total_rows=total,
+                total_rows=scanned,
                 inserted_rows=inserted,
                 updated_rows=updated,
                 failed_rows=failed,
-                status="failed" if error_msg else "success",
+                status=status,
                 error_message=error_msg,
                 finished_at=datetime.now(timezone.utc),
             )
