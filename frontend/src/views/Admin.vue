@@ -173,6 +173,16 @@ const form = ref({
   scope_owners: [],
 });
 const formError = ref("");
+// Per-field errors so the user sees exactly which input is wrong, in-place,
+// instead of a single line buried at the bottom of a tall dialog.
+const usernameErr = ref("");
+const passwordErr = ref("");
+
+function resetErrors() {
+  formError.value = "";
+  usernameErr.value = "";
+  passwordErr.value = "";
+}
 
 function openCreate() {
   editing.value = null;
@@ -180,7 +190,7 @@ function openCreate() {
     username: "", password: "", role: ROLE_TENANT_USER, display_name: "",
     scope_mode: "all", scope_owners: [],
   };
-  formError.value = "";
+  resetErrors();
   dialogOpen.value = true;
 }
 function openEdit(u) {
@@ -191,7 +201,7 @@ function openEdit(u) {
     scope_mode: mode,
     scope_owners: Array.isArray(u.data_scope_owners) ? u.data_scope_owners.slice() : [],
   };
-  formError.value = "";
+  resetErrors();
   dialogOpen.value = true;
 }
 
@@ -208,8 +218,60 @@ function toggleScopeOwner(name) {
   if (i === -1) arr.push(name); else arr.splice(i, 1);
 }
 
+// Mirror the backend's Field(min_length=..., max_length=...) on UserCreate
+// so the user gets a clear, in-form error instead of a generic 422 toast.
+const USERNAME_MIN = 2;
+const USERNAME_MAX = 64;
+const PASSWORD_MIN = 6;
+const PASSWORD_MAX = 128;
+
+function validateForCreate() {
+  let ok = true;
+  const u = (form.value.username || "").trim();
+  const p = form.value.password || "";  // don't trim password — spaces could be intentional
+  form.value.username = u;               // commit the trimmed value
+  if (!u) {
+    usernameErr.value = "账号不能为空";
+    ok = false;
+  } else if (u.length < USERNAME_MIN) {
+    usernameErr.value = `账号至少 ${USERNAME_MIN} 个字符`;
+    ok = false;
+  } else if (u.length > USERNAME_MAX) {
+    usernameErr.value = `账号不能超过 ${USERNAME_MAX} 个字符`;
+    ok = false;
+  }
+  if (!p) {
+    passwordErr.value = "密码不能为空";
+    ok = false;
+  } else if (p.length < PASSWORD_MIN) {
+    passwordErr.value = `密码至少 ${PASSWORD_MIN} 位`;
+    ok = false;
+  } else if (p.length > PASSWORD_MAX) {
+    passwordErr.value = `密码不能超过 ${PASSWORD_MAX} 个字符`;
+    ok = false;
+  }
+  return ok;
+}
+
+function validateForEdit() {
+  // Editing: password is optional (empty = don't change). Only validate
+  // length when the user actually typed something.
+  const p = form.value.password || "";
+  if (p && (p.length < PASSWORD_MIN || p.length > PASSWORD_MAX)) {
+    passwordErr.value = `密码至少 ${PASSWORD_MIN} 位，最多 ${PASSWORD_MAX} 位`;
+    return false;
+  }
+  return true;
+}
+
 async function submit() {
-  formError.value = "";
+  resetErrors();
+  if (editing.value) {
+    if (!validateForEdit()) return;
+  } else {
+    if (!validateForCreate()) return;
+  }
+
   try {
     if (editing.value) {
       const body = {};
@@ -229,10 +291,6 @@ async function submit() {
       await updateUser(editing.value.id, body);
       ui.showToast("已更新", "success");
     } else {
-      if (!form.value.username || !form.value.password) {
-        formError.value = "账号和密码必填";
-        return;
-      }
       const body = {
         username: form.value.username,
         password: form.value.password,
@@ -350,13 +408,34 @@ watch(() => route.query.tenant_id, async () => { await refresh(); await loadOwne
         <button class="btn ghost sm" @click="dialogOpen = false">✕</button>
       </header>
       <div class="modal-body">
-        <div class="field">
-          <label>账号</label>
-          <input :disabled="!!editing" v-model="form.username" placeholder="至少 2 个字符" />
+        <div class="field" :class="{ 'has-error': usernameErr }">
+          <label>
+            账号
+            <span v-if="!editing" class="req-mark" title="必填">*</span>
+          </label>
+          <input
+            :disabled="!!editing"
+            v-model="form.username"
+            placeholder="至少 2 个字符"
+            autocomplete="off"
+            @input="usernameErr = ''"
+          />
+          <div v-if="usernameErr" class="field-error">{{ usernameErr }}</div>
         </div>
-        <div class="field">
-          <label>密码 <span v-if="editing" class="t-muted" style="font-size:11px">（留空则不修改）</span></label>
-          <input type="password" v-model="form.password" placeholder="至少 6 位" />
+        <div class="field" :class="{ 'has-error': passwordErr }">
+          <label>
+            密码
+            <span v-if="!editing" class="req-mark" title="必填">*</span>
+            <span v-if="editing" class="t-muted" style="font-size:11px">（留空则不修改）</span>
+          </label>
+          <input
+            type="password"
+            v-model="form.password"
+            placeholder="至少 6 位"
+            autocomplete="new-password"
+            @input="passwordErr = ''"
+          />
+          <div v-if="passwordErr" class="field-error">{{ passwordErr }}</div>
         </div>
         <div class="field">
           <label>显示名</label>
@@ -424,9 +503,21 @@ watch(() => route.query.tenant_id, async () => { await refresh(); await loadOwne
   appearance: none; border: 1px solid var(--border); border-radius: 8px;
   padding: 9px 12px; font-family: var(--font-sans); font-size: 14px; color: var(--ink);
   background: var(--surface);
+  transition: border-color 0.15s, box-shadow 0.15s;
 }
 .field input:focus, .field select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-line); }
 .field input:disabled { background: var(--bg-elev); color: var(--ink-4); cursor: not-allowed; }
+
+/* Required-field indicator + inline error state */
+.req-mark { color: var(--neg); font-weight: 600; margin-left: 2px; }
+.field-error {
+  font-size: 12px; color: var(--neg);
+  font-family: var(--font-sans);
+}
+.field.has-error input {
+  border-color: var(--neg);
+  box-shadow: 0 0 0 3px oklch(56% 0.16 30 / 0.12);
+}
 
 .modal-backdrop {
   position: fixed; inset: 0; background: rgba(20, 20, 15, 0.45);
