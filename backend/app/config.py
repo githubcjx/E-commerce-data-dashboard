@@ -23,7 +23,11 @@ class Settings(BaseSettings):
     platform_admin_username: str = "cjx"
     platform_admin_password: str = "change-me-on-first-deploy"
 
-    upload_max_mb: int = 20
+    # Per-upload limit. Whole file is read into memory before being spooled to
+    # disk (see import_api.upload), so peak RAM ≈ 2× this value. On a 2C2G
+    # server 50 MB is the comfortable ceiling; raising past 80 MB without
+    # switching to streaming I/O risks OOM under concurrent uploads.
+    upload_max_mb: int = 50
     cors_origins: list[str] = ["http://localhost:5173", "http://localhost:3000"]
 
 

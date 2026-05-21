@@ -156,7 +156,7 @@ onMounted(refreshHistory);
         </svg>
       </div>
       <h3>拖拽 Excel 至此处或点击选择</h3>
-      <p>支持 .xlsx / .xls · 单次最大 20MB · 首行作为表头</p>
+      <p>支持 .xlsx / .xls · 单次最大 50MB · 首行作为表头</p>
       <input ref="inputRef" type="file" accept=".xlsx,.xls" style="display:none" @change="handleFile($event.target.files?.[0])" />
     </div>
 
