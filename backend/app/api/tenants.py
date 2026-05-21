@@ -6,12 +6,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
 from ..models import (
-    ROLE_TENANT_ADMIN, TENANT_STATUS_ACTIVE, TENANT_STATUS_DISABLED, Tenant, User,
+    ROLE_TENANT_SUPER_ADMIN, TENANT_STATUS_ACTIVE, TENANT_STATUS_DISABLED, Tenant, User,
 )
 from ..schemas import (
     ApiResponse, TenantConfigOut, TenantConfigUpdate, TenantCreate, TenantOut, TenantUpdate,
 )
-from ..security import get_current_user, hash_password, require_platform_admin, require_tenant_admin
+from ..security import get_current_user, hash_password, require_platform_admin, require_tenant_super_admin
 
 router = APIRouter(prefix="/api/tenants", tags=["tenants"])
 
@@ -59,11 +59,14 @@ async def create_tenant(
     db.add(tenant)
     await db.flush()  # populate tenant.id
 
+    # Initial account is the tenant's super-admin — full privileges within
+    # the tenant, including creating other users (admin / 普通用户) and
+    # assigning per-user data scopes.
     admin = User(
         tenant_id=tenant.id,
         username=body.admin_username,
         password_hash=hash_password(body.admin_password),
-        role=ROLE_TENANT_ADMIN,
+        role=ROLE_TENANT_SUPER_ADMIN,
         display_name=body.admin_display_name,
         created_by=actor.id,
     )
@@ -117,11 +120,11 @@ async def get_my_tenant_config(
 @router.put("/me/config", response_model=ApiResponse[TenantConfigOut])
 async def update_my_tenant_config(
     body: TenantConfigUpdate,
-    actor: User = Depends(require_tenant_admin),
+    actor: User = Depends(require_tenant_super_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Only tenant_admin (or platform_admin) of THIS tenant can change the
-    固定利润率. platform_admin can also reach in here from any tenant.
+    """Only tenant_super_admin (or platform_admin) of THIS tenant can change
+    the 固定利润率. Plain tenant_admin can't — it's a company-wide setting.
     """
     if actor.tenant_id is None:
         raise HTTPException(status_code=400, detail="平台管理员请在企业内执行此操作")

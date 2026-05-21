@@ -31,7 +31,18 @@ from decimal import Decimal
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..models import SalesRecord, Tenant
+from ..models import (
+    ROLE_PLATFORM_ADMIN, ROLE_TENANT_SUPER_ADMIN, SalesRecord, Tenant, User,
+)
+
+
+def effective_scope_owners(user: User) -> list[str] | None:
+    """Return the list of 负责人 the user is restricted to, or None for full
+    access. Super-admin and platform_admin always see everything.
+    """
+    if user.role in (ROLE_PLATFORM_ADMIN, ROLE_TENANT_SUPER_ADMIN):
+        return None
+    return user.data_scope_owners
 
 
 @dataclass(frozen=True)
@@ -154,7 +165,20 @@ def _enumerate_buckets(start: date, end: date, granularity: str) -> list[tuple[d
 # Filters + aggregation primitives
 # ---------------------------------------------------------------------------
 
-def _apply_filters(stmt, tenant_id: int, shop_code: str | None, owner: str | None, category: str | None):
+def _apply_filters(
+    stmt, tenant_id: int,
+    shop_code: str | None, owner: str | None, category: str | None,
+    scope_owners: list[str] | None = None,
+):
+    """Common WHERE clauses for every dashboard query.
+
+    scope_owners enforces per-user data isolation:
+      None → no extra restriction (super_admin / platform_admin)
+      []   → match nothing (user explicitly scoped to no owners)
+      [..] → SalesRecord.owner IN (this list)
+    Caller MUST intersect with the UI's owner picker (if the user picked one
+    specific owner from the dropdown).
+    """
     stmt = stmt.where(SalesRecord.tenant_id == tenant_id)
     if shop_code and shop_code != "all":
         stmt = stmt.where(SalesRecord.shop_code == shop_code)
@@ -162,6 +186,12 @@ def _apply_filters(stmt, tenant_id: int, shop_code: str | None, owner: str | Non
         stmt = stmt.where(SalesRecord.owner == owner)
     if category and category != "all":
         stmt = stmt.where(SalesRecord.category == category)
+    if scope_owners is not None:
+        if not scope_owners:
+            # Force-empty result for a user scoped to nothing.
+            stmt = stmt.where(SalesRecord.id == -1)
+        else:
+            stmt = stmt.where(SalesRecord.owner.in_(scope_owners))
     return stmt
 
 
@@ -173,6 +203,7 @@ async def _daily_aggregates(
     shop_code: str | None,
     owner: str | None,
     category: str | None,
+    scope_owners: list[str] | None = None,
 ) -> dict[date, dict[str, float]]:
     """One query: GROUP BY date over [start, end], return {date: {col: float}}."""
     if start > end:
@@ -188,7 +219,7 @@ async def _daily_aggregates(
         func.coalesce(func.sum(SalesRecord.marketing_cost), 0).label("marketing_cost"),
     )
     stmt = select(*cols).where(and_(SalesRecord.date >= start, SalesRecord.date <= end))
-    stmt = _apply_filters(stmt, tenant_id, shop_code, owner, category).group_by(SalesRecord.date)
+    stmt = _apply_filters(stmt, tenant_id, shop_code, owner, category, scope_owners).group_by(SalesRecord.date)
     rows = (await session.execute(stmt)).all()
     return {
         r.date: {col: float(getattr(r, col) or 0) for col in _AGG_COLS}
@@ -257,7 +288,7 @@ async def _tenant_fixed_rate(session: AsyncSession, tenant_id: int) -> float:
 
 async def get_kpis(
     session, tenant_id, start_date, end_date, granularity, shop_code, owner, category,
-    subtract_fixed: bool = True,
+    subtract_fixed: bool = True, scope_owners: list[str] | None = None,
 ):
     start_date, end_date = normalize_range(start_date, end_date)
     prev_start, prev_end = previous_range(start_date, end_date)
@@ -265,7 +296,7 @@ async def get_kpis(
 
     # One query covers prev + current span; series buckets are inside current.
     daily = await _daily_aggregates(
-        session, tenant_id, prev_start, end_date, shop_code, owner, category
+        session, tenant_id, prev_start, end_date, shop_code, owner, category, scope_owners
     )
 
     curr_kpi = _kpis_from_sums(_sum_range(daily, start_date, end_date), fixed, subtract_fixed)
@@ -305,6 +336,7 @@ async def get_kpis(
 async def get_trend(
     session, tenant_id, start_date, end_date, granularity, metric,
     shop_code, owner, category, subtract_fixed: bool = True,
+    scope_owners: list[str] | None = None,
 ):
     if metric not in {m.key for m in METRIC_DEFS}:
         metric = "sales"
@@ -312,7 +344,7 @@ async def get_trend(
     fixed = await _tenant_fixed_rate(session, tenant_id)
 
     daily = await _daily_aggregates(
-        session, tenant_id, start_date, end_date, shop_code, owner, category
+        session, tenant_id, start_date, end_date, shop_code, owner, category, scope_owners
     )
 
     buckets = _enumerate_buckets(start_date, end_date, granularity)
@@ -324,7 +356,8 @@ async def get_trend(
 
 
 async def get_category_breakdown(
-    session, tenant_id, start_date, end_date, shop_code, owner, subtract_fixed: bool = True,
+    session, tenant_id, start_date, end_date, shop_code, owner,
+    subtract_fixed: bool = True, scope_owners: list[str] | None = None,
 ):
     """Per-category aggregate with prev-period 环比 on sales + profit.
 
@@ -345,7 +378,7 @@ async def get_category_breakdown(
             func.coalesce(func.sum(SalesRecord.shipping_cost), 0).label("shipping_cost"),
         )
         stmt = select(*cols).where(and_(SalesRecord.date >= start, SalesRecord.date <= end)).group_by(SalesRecord.category)
-        return _apply_filters(stmt, tenant_id, shop_code, owner, None)
+        return _apply_filters(stmt, tenant_id, shop_code, owner, None, scope_owners)
 
     curr_rows = (await session.execute(_select_for(start_date, end_date))).all()
     prev_rows = (await session.execute(_select_for(prev_start, prev_end))).all()
@@ -394,14 +427,34 @@ async def get_category_breakdown(
     return out
 
 
-async def get_filters(session, tenant_id):
+async def get_filters(session, tenant_id, scope_owners: list[str] | None = None):
+    """Filter dropdowns + data bounds. When the user is scoped to specific
+    owners, the dropdown only surfaces those names — so they can't even
+    "see" the existence of owners outside their scope.
+    """
     shop_stmt = select(SalesRecord.shop_code, SalesRecord.shop_name).where(SalesRecord.tenant_id == tenant_id).distinct()
     shops = [{"code": code, "name": name or code} for code, name in (await session.execute(shop_stmt)).all() if code]
-    owners = sorted(
-        o for (o,) in (await session.execute(
+
+    if scope_owners is None:
+        owner_rows = (await session.execute(
             select(SalesRecord.owner).where(SalesRecord.tenant_id == tenant_id).distinct()
-        )).all() if o
-    )
+        )).all()
+        owners = sorted(o for (o,) in owner_rows if o)
+    else:
+        # Restrict to the user's allowed set, intersected with what actually
+        # exists in the data (so a typo'd scope entry just disappears from
+        # the dropdown rather than erroring).
+        if not scope_owners:
+            owners = []
+        else:
+            owner_rows = (await session.execute(
+                select(SalesRecord.owner)
+                .where(SalesRecord.tenant_id == tenant_id)
+                .where(SalesRecord.owner.in_(scope_owners))
+                .distinct()
+            )).all()
+            owners = sorted(o for (o,) in owner_rows if o)
+
     cats = sorted(
         c for (c,) in (await session.execute(
             select(SalesRecord.category).where(SalesRecord.tenant_id == tenant_id).distinct()

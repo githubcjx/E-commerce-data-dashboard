@@ -2,7 +2,7 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from sqlalchemy import (
-    BigInteger, Date, DateTime, ForeignKey, Index, Integer, Numeric, String, Text,
+    BigInteger, Date, DateTime, ForeignKey, Index, Integer, JSON, Numeric, String, Text,
     UniqueConstraint, func,
 )
 from sqlalchemy.orm import Mapped, mapped_column
@@ -10,10 +10,23 @@ from sqlalchemy.orm import Mapped, mapped_column
 from .db import Base
 
 
-# Role values — three-level hierarchy.
+# Role values — four-level hierarchy.
+#   platform_admin     : cjx, no tenant. Manages all tenants/users.
+#   tenant_super_admin : initial account created with the tenant. Full
+#                        privileges within the tenant — can create users,
+#                        set roles (admin/user), set per-user data scopes.
+#   tenant_admin       : has backend access, but only to EDIT existing
+#                        普通用户 (display name / password). Cannot create
+#                        or delete accounts, cannot change roles or scopes.
+#   tenant_user        : regular user. Sees only data within their assigned
+#                        owner list (data_scope_owners), or all if NULL.
 ROLE_PLATFORM_ADMIN = "platform_admin"
+ROLE_TENANT_SUPER_ADMIN = "tenant_super_admin"
 ROLE_TENANT_ADMIN = "tenant_admin"
 ROLE_TENANT_USER = "tenant_user"
+
+# Roles that have access to the /admin backend page.
+BACKEND_ROLES = {ROLE_PLATFORM_ADMIN, ROLE_TENANT_SUPER_ADMIN, ROLE_TENANT_ADMIN}
 
 TENANT_STATUS_ACTIVE = "active"
 TENANT_STATUS_DISABLED = "disabled"
@@ -56,6 +69,13 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[str] = mapped_column(String(32), nullable=False, default=ROLE_TENANT_USER)
     display_name: Mapped[str | None] = mapped_column(String(64))
+    # Per-user data scope. Set by the tenant_super_admin via the admin panel.
+    #   NULL  → unrestricted (default; super_admin & platform_admin always
+    #           behave as if NULL regardless of stored value).
+    #   []    → user sees no rows (deliberately scoped to nothing).
+    #   [...] → WHERE sales_records.owner IN (this list).
+    # JSON, not JSONB, because we need the same type to work under SQLite too.
+    data_scope_owners: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     created_by: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

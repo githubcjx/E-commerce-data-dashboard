@@ -1,6 +1,9 @@
 import { createRouter, createWebHashHistory } from "vue-router";
 import { hasToken, getStoredUser } from "../api/client";
-import { ROLE_PLATFORM, ROLE_TENANT_ADMIN } from "../stores/user";
+import { ROLE_PLATFORM, ROLE_TENANT_SUPER, ROLE_TENANT_ADMIN } from "../stores/user";
+
+// Roles allowed into /admin/users (backend access).
+const BACKEND_ROLES = new Set([ROLE_PLATFORM, ROLE_TENANT_SUPER, ROLE_TENANT_ADMIN]);
 
 const routes = [
   { path: "/login", name: "login", component: () => import("../views/Login.vue") },
@@ -42,7 +45,7 @@ router.beforeEach((to) => {
   const u = getStoredUser();
   if (to.meta?.requiresPlatform && u?.role !== ROLE_PLATFORM) return { name: "dashboard" };
   if (to.meta?.requiresAdmin) {
-    if (!u || (u.role !== ROLE_PLATFORM && u.role !== ROLE_TENANT_ADMIN)) {
+    if (!u || !BACKEND_ROLES.has(u.role)) {
       return { name: "dashboard" };
     }
   }

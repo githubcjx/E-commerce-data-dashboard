@@ -1,9 +1,13 @@
 <script setup>
 import { computed, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import { listUsers, createUser, updateUser, deleteUser } from "../api/users";
+import {
+  listUsers, createUser, updateUser, deleteUser, listTenantOwners,
+} from "../api/users";
 import { getTenantConfig, updateTenantConfig } from "../api/dashboard";
-import { useUserStore } from "../stores/user";
+import {
+  useUserStore, ROLE_PLATFORM, ROLE_TENANT_SUPER, ROLE_TENANT_ADMIN, ROLE_TENANT_USER,
+} from "../stores/user";
 import { useUiStore } from "../stores/ui";
 
 const userStore = useUserStore();
@@ -13,12 +17,17 @@ const router = useRouter();
 
 const users = ref([]);
 const loading = ref(false);
+const ownersAvailable = ref([]);   // 负责人 list for the scope multi-select
 
-// 固定利润率配置（tenant_admin 可编辑、platform_admin 跨租户时不显示）
+// ---------------------------------------------------------------------------
+// Tenant config (固定利润率) — super_admin only.
+// ---------------------------------------------------------------------------
 const cfg = ref({ fixed_profit_rate: 0.13 });
-const cfgInput = ref("13");          // 显示成百分比（13 表示 13%）
+const cfgInput = ref("13");
 const cfgSaving = ref(false);
-const showCfg = computed(() => !userStore.isPlatformAdmin && userStore.user?.role === "tenant_admin");
+// Visible only to a tenant_super_admin viewing their own tenant. Platform
+// admin sees the org-config panel in Tenants.vue (or directly via DB).
+const showCfg = computed(() => userStore.isTenantSuperAdmin);
 
 async function loadCfg() {
   if (!showCfg.value) return;
@@ -28,7 +37,6 @@ async function loadCfg() {
     cfgInput.value = (Number(data.fixed_profit_rate) * 100).toFixed(2).replace(/\.?0+$/, "");
   } catch (e) { /* ignore */ }
 }
-
 async function saveCfg() {
   const pct = Number(cfgInput.value);
   if (!Number.isFinite(pct) || pct < 0 || pct >= 100) {
@@ -47,16 +55,16 @@ async function saveCfg() {
   }
 }
 
-// When platform_admin lands here from "/admin/tenants → 用户" they bring
-// tenant_id/tenant_code/tenant_name in the query string. Otherwise it's the
-// admin viewing their own tenant.
+// ---------------------------------------------------------------------------
+// Target tenant (platform_admin reaches here via query string; tenant users
+// always see their own tenant).
+// ---------------------------------------------------------------------------
 const targetTenantId = computed(() => {
   if (userStore.isPlatformAdmin) {
     return route.query.tenant_id ? Number(route.query.tenant_id) : null;
   }
   return userStore.tenant?.id || null;
 });
-
 const targetTenantLabel = computed(() => {
   if (userStore.isPlatformAdmin) {
     if (route.query.tenant_code) return `${route.query.tenant_code} · ${route.query.tenant_name || ""}`;
@@ -65,24 +73,76 @@ const targetTenantLabel = computed(() => {
   return userStore.tenant ? `${userStore.tenant.code} · ${userStore.tenant.name}` : null;
 });
 
-const dialogOpen = ref(false);
-const editing = ref(null);
-const form = ref({ username: "", password: "", role: "tenant_user", display_name: "" });
-const formError = ref("");
+// ---------------------------------------------------------------------------
+// Permission helpers — mirror the backend rules so the UI doesn't offer
+// actions the server will reject anyway.
+// ---------------------------------------------------------------------------
+const me = computed(() => userStore.user);
+const canCreate = computed(() => userStore.canManageUsers);
+
+function canEditTarget(t) {
+  if (!me.value) return false;
+  if (t.role === ROLE_PLATFORM) return false;            // platform_admin off-limits
+  if (me.value.role === ROLE_PLATFORM) return true;       // platform_admin can edit any non-platform
+  if (me.value.role === ROLE_TENANT_SUPER) {
+    if (t.tenant_id !== me.value.tenant_id) return false;
+    if (t.role === ROLE_TENANT_SUPER && t.id !== me.value.id) return false;
+    return true;                                          // includes self (password/display)
+  }
+  if (me.value.role === ROLE_TENANT_ADMIN) {
+    // Plain admin can only edit 普通用户 in own tenant, not even themselves.
+    return t.tenant_id === me.value.tenant_id
+      && t.role === ROLE_TENANT_USER
+      && t.id !== me.value.id;
+  }
+  return false;
+}
+function canDeleteTarget(t) {
+  if (!me.value) return false;
+  if (t.id === me.value.id) return false;
+  if (t.role === ROLE_PLATFORM) return false;
+  if (me.value.role === ROLE_PLATFORM) return true;
+  if (me.value.role === ROLE_TENANT_SUPER) {
+    return t.tenant_id === me.value.tenant_id && t.role !== ROLE_TENANT_SUPER;
+  }
+  return false;
+}
+// Whether the actor can change role/scope on this target (subset of edit).
+function canEditPrivileged(t) {
+  if (!me.value) return false;
+  if (me.value.role === ROLE_PLATFORM) return t.role !== ROLE_PLATFORM;
+  if (me.value.role === ROLE_TENANT_SUPER) {
+    // Can edit role/scope of admin/user in own tenant; not self (would let
+    // them strip their own super status), not other supers.
+    return t.tenant_id === me.value.tenant_id
+      && t.role !== ROLE_TENANT_SUPER
+      && t.id !== me.value.id;
+  }
+  return false;
+}
 
 function roleLabel(role) {
-  if (role === "platform_admin") return "平台管理员";
-  if (role === "tenant_admin") return "管理员";
+  if (role === ROLE_PLATFORM) return "平台管理员";
+  if (role === ROLE_TENANT_SUPER) return "超级管理员";
+  if (role === ROLE_TENANT_ADMIN) return "管理员";
   return "普通用户";
 }
-
-function canEdit(target) {
-  if (target.id === userStore.user?.id) return false;       // not self
-  if (target.role === "platform_admin") return false;       // platform_admin off-limits here
-  return true;
+function roleTagClass(role) {
+  if (role === ROLE_PLATFORM) return "tag";
+  if (role === ROLE_TENANT_SUPER) return "tag danger";
+  if (role === ROLE_TENANT_ADMIN) return "tag success";
+  return "tag";
 }
-function canDelete(target) { return canEdit(target); }
+function scopeSummary(u) {
+  if (u.role === ROLE_PLATFORM || u.role === ROLE_TENANT_SUPER) return "全部数据";
+  if (u.data_scope_owners === null || u.data_scope_owners === undefined) return "全部数据";
+  if (u.data_scope_owners.length === 0) return "无数据";
+  return u.data_scope_owners.join(" / ");
+}
 
+// ---------------------------------------------------------------------------
+// Data loading
+// ---------------------------------------------------------------------------
 async function refresh() {
   if (userStore.isPlatformAdmin && !targetTenantId.value) {
     users.value = [];
@@ -94,17 +154,58 @@ async function refresh() {
   finally { loading.value = false; }
 }
 
+async function loadOwners() {
+  if (!userStore.canManageUsers) return;
+  try {
+    const data = await listTenantOwners(targetTenantId.value);
+    ownersAvailable.value = data.owners || [];
+  } catch (_) { ownersAvailable.value = []; }
+}
+
+// ---------------------------------------------------------------------------
+// Create / edit dialog
+// ---------------------------------------------------------------------------
+const dialogOpen = ref(false);
+const editing = ref(null);
+const form = ref({
+  username: "", password: "", role: ROLE_TENANT_USER, display_name: "",
+  scope_mode: "all",        // "all" → unrestricted; "selected" → use scope_owners
+  scope_owners: [],
+});
+const formError = ref("");
+
 function openCreate() {
   editing.value = null;
-  form.value = { username: "", password: "", role: "tenant_user", display_name: "" };
+  form.value = {
+    username: "", password: "", role: ROLE_TENANT_USER, display_name: "",
+    scope_mode: "all", scope_owners: [],
+  };
   formError.value = "";
   dialogOpen.value = true;
 }
 function openEdit(u) {
   editing.value = u;
-  form.value = { username: u.username, password: "", role: u.role, display_name: u.display_name || "" };
+  const mode = u.data_scope_owners === null || u.data_scope_owners === undefined ? "all" : "selected";
+  form.value = {
+    username: u.username, password: "", role: u.role, display_name: u.display_name || "",
+    scope_mode: mode,
+    scope_owners: Array.isArray(u.data_scope_owners) ? u.data_scope_owners.slice() : [],
+  };
   formError.value = "";
   dialogOpen.value = true;
+}
+
+// Whether the current dialog should expose role/scope controls. Plain admin
+// editing a 普通用户 doesn't get these (only password + display_name).
+const dialogAllowsPrivileged = computed(() => {
+  if (!editing.value) return canCreate.value; // create-mode → super/platform
+  return canEditPrivileged(editing.value);
+});
+
+function toggleScopeOwner(name) {
+  const arr = form.value.scope_owners;
+  const i = arr.indexOf(name);
+  if (i === -1) arr.push(name); else arr.splice(i, 1);
 }
 
 async function submit() {
@@ -113,8 +214,18 @@ async function submit() {
     if (editing.value) {
       const body = {};
       if (form.value.password) body.password = form.value.password;
-      if (form.value.display_name !== (editing.value.display_name || "")) body.display_name = form.value.display_name;
-      if (form.value.role !== editing.value.role) body.role = form.value.role;
+      if (form.value.display_name !== (editing.value.display_name || "")) {
+        body.display_name = form.value.display_name;
+      }
+      if (dialogAllowsPrivileged.value) {
+        if (form.value.role !== editing.value.role) body.role = form.value.role;
+        // Scope: send when it differs from current. "all" → null; "selected" → list.
+        const newScope = form.value.scope_mode === "all" ? null : form.value.scope_owners.slice();
+        const oldScope = editing.value.data_scope_owners ?? null;
+        if (JSON.stringify(newScope) !== JSON.stringify(oldScope)) {
+          body.data_scope_owners = newScope;
+        }
+      }
       await updateUser(editing.value.id, body);
       ui.showToast("已更新", "success");
     } else {
@@ -127,8 +238,8 @@ async function submit() {
         password: form.value.password,
         role: form.value.role,
         display_name: form.value.display_name || null,
+        data_scope_owners: form.value.scope_mode === "all" ? null : form.value.scope_owners.slice(),
       };
-      // Platform admin creating users into a target tenant must specify it.
       if (userStore.isPlatformAdmin) body.tenant_id = targetTenantId.value;
       await createUser(body);
       ui.showToast("已新增", "success");
@@ -151,19 +262,17 @@ async function remove(u) {
   }
 }
 
-function backToTenants() {
-  router.push({ name: "tenants" });
-}
+function backToTenants() { router.push({ name: "tenants" }); }
 
-onMounted(async () => { await refresh(); await loadCfg(); });
-watch(() => route.query.tenant_id, refresh);
+onMounted(async () => { await refresh(); await loadCfg(); await loadOwners(); });
+watch(() => route.query.tenant_id, async () => { await refresh(); await loadOwners(); });
 </script>
 
 <template>
   <section v-if="showCfg" class="panel" style="margin-bottom:16px">
     <header class="panel-head">
       <span class="panel-title">企业配置</span>
-      <span class="panel-subtitle">仅企业管理员可见 · 影响看板的「公司利润率」计算</span>
+      <span class="panel-subtitle">仅超级管理员可见 · 影响看板的「公司利润率」计算</span>
     </header>
     <div style="padding:18px 22px">
       <div class="cfg-row">
@@ -178,7 +287,7 @@ watch(() => route.query.tenant_id, refresh);
         </div>
       </div>
       <div class="t-muted" style="font-size:12px;margin-top:8px">
-        当前生效值：{{ (cfg.fixed_profit_rate * 100).toFixed(2).replace(/\.?0+$/, "") }}%。看板「公司利润率」卡片上的开关只控制当前用户是否减去此值，不影响这里保存的配置。
+        当前生效值：{{ (cfg.fixed_profit_rate * 100).toFixed(2).replace(/\.?0+$/, "") }}%。看板上每个用户卡片的开关只控制自己是否减去此值，不影响这里保存的配置。
       </div>
     </div>
   </section>
@@ -190,7 +299,7 @@ watch(() => route.query.tenant_id, refresh);
       <span class="panel-subtitle" v-else>共 {{ users.length }} 个账号</span>
       <div class="panel-actions">
         <button v-if="userStore.isPlatformAdmin" class="btn ghost sm" @click="backToTenants">← 返回企业列表</button>
-        <button class="btn primary sm" @click="openCreate">+ 新增账号</button>
+        <button v-if="canCreate" class="btn primary sm" @click="openCreate">+ 新增账号</button>
       </div>
     </header>
     <table class="tbl">
@@ -199,6 +308,7 @@ watch(() => route.query.tenant_id, refresh);
           <th style="text-align:left">账号</th>
           <th style="text-align:left">显示名</th>
           <th style="text-align:left">角色</th>
+          <th style="text-align:left">数据范围</th>
           <th style="text-align:left">创建时间</th>
           <th style="text-align:right">操作</th>
         </tr>
@@ -208,16 +318,19 @@ watch(() => route.query.tenant_id, refresh);
           <td>{{ u.username }}<span v-if="u.id === userStore.user?.id" class="tag" style="margin-left:8px">我</span></td>
           <td style="text-align:left">{{ u.display_name || '—' }}</td>
           <td style="text-align:left">
-            <span :class="['tag', u.role === 'tenant_admin' ? 'success' : '']">{{ roleLabel(u.role) }}</span>
+            <span :class="roleTagClass(u.role)">{{ roleLabel(u.role) }}</span>
+          </td>
+          <td style="text-align:left" :class="(u.role === 'tenant_user' || u.role === 'tenant_admin') && u.data_scope_owners !== null && u.data_scope_owners !== undefined ? '' : 't-muted'">
+            {{ scopeSummary(u) }}
           </td>
           <td style="text-align:left" class="t-muted">{{ new Date(u.created_at).toLocaleString("zh-CN", { hour12: false }) }}</td>
           <td>
-            <button class="btn ghost sm" :disabled="!canEdit(u)" @click="openEdit(u)">编辑</button>
-            <button class="btn ghost sm" :disabled="!canDelete(u)" @click="remove(u)" style="color:var(--neg)">删除</button>
+            <button class="btn ghost sm" :disabled="!canEditTarget(u)" @click="openEdit(u)">编辑</button>
+            <button class="btn ghost sm" :disabled="!canDeleteTarget(u)" @click="remove(u)" style="color:var(--neg)">删除</button>
           </td>
         </tr>
         <tr v-if="!loading && !users.length">
-          <td colspan="5" class="empty-state">暂无用户</td>
+          <td colspan="6" class="empty-state">暂无用户</td>
         </tr>
       </tbody>
     </table>
@@ -242,13 +355,51 @@ watch(() => route.query.tenant_id, refresh);
           <label>显示名</label>
           <input v-model="form.display_name" placeholder="可选" />
         </div>
-        <div class="field">
-          <label>角色</label>
-          <select class="select" v-model="form.role">
-            <option value="tenant_user">普通用户</option>
-            <option value="tenant_admin">管理员</option>
-          </select>
-        </div>
+
+        <!-- Role + scope only when the actor has privilege to edit them. -->
+        <template v-if="dialogAllowsPrivileged">
+          <div class="field">
+            <label>角色</label>
+            <select class="select" v-model="form.role">
+              <option value="tenant_user">普通用户</option>
+              <option value="tenant_admin">管理员</option>
+            </select>
+            <div class="t-muted" style="font-size:11px;margin-top:4px">
+              管理员有后台权限（只能编辑普通用户），普通用户无后台。
+            </div>
+          </div>
+
+          <div class="field">
+            <label>数据查看范围</label>
+            <div class="scope-mode">
+              <label class="scope-radio">
+                <input type="radio" value="all" v-model="form.scope_mode" />
+                全部数据
+              </label>
+              <label class="scope-radio">
+                <input type="radio" value="selected" v-model="form.scope_mode" />
+                指定负责人
+              </label>
+            </div>
+            <div v-if="form.scope_mode === 'selected'" class="owner-pick">
+              <div v-if="!ownersAvailable.length" class="t-muted" style="font-size:12px">
+                当前企业还没有任何负责人数据，请先导入 Excel。
+              </div>
+              <label v-for="n in ownersAvailable" :key="n" class="owner-chip">
+                <input
+                  type="checkbox"
+                  :checked="form.scope_owners.includes(n)"
+                  @change="toggleScopeOwner(n)"
+                />
+                <span>{{ n }}</span>
+              </label>
+            </div>
+            <div class="t-muted" style="font-size:11px;margin-top:4px">
+              管理员和普通用户均可设置数据范围。超级管理员永远拥有全部数据。
+            </div>
+          </div>
+        </template>
+
         <div class="error">{{ formError }}</div>
       </div>
       <footer class="modal-foot">
@@ -275,17 +426,18 @@ watch(() => route.query.tenant_id, refresh);
   display: grid; place-items: center; z-index: 80; backdrop-filter: blur(4px);
 }
 .modal-card {
-  width: 460px; max-width: calc(100vw - 32px);
+  width: 480px; max-width: calc(100vw - 32px);
   background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
   box-shadow: var(--shadow-pop);
   display: flex; flex-direction: column;
+  max-height: calc(100vh - 60px);
 }
 .modal-head, .modal-foot {
   padding: 14px 18px; display: flex; align-items: center; gap: 12px;
   border-bottom: 1px solid var(--divider);
 }
 .modal-foot { border-bottom: 0; border-top: 1px solid var(--divider); justify-content: flex-end; }
-.modal-body { padding: 18px; }
+.modal-body { padding: 18px; overflow-y: auto; }
 .error { font-size: 12px; color: var(--neg); min-height: 16px; }
 
 .cfg-row { display: flex; flex-direction: column; gap: 8px; }
@@ -299,4 +451,29 @@ watch(() => route.query.tenant_id, refresh);
 }
 .cfg-input input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-line); }
 .cfg-input .suffix { color: var(--ink-4); font-family: var(--font-mono); font-size: 13px; }
+
+.scope-mode { display: flex; gap: 14px; padding: 4px 0; }
+.scope-radio {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 13px; font-weight: 500; color: var(--ink-2); cursor: pointer;
+}
+.scope-radio input { width: auto; padding: 0; }
+.owner-pick {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  padding: 10px; margin-top: 4px;
+  border: 1px dashed var(--border); border-radius: 8px;
+  max-height: 180px; overflow-y: auto;
+}
+.owner-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 4px 10px;
+  border: 1px solid var(--border); border-radius: 999px;
+  font-size: 12px; cursor: pointer;
+  user-select: none; background: var(--surface);
+}
+.owner-chip input { width: auto; padding: 0; margin: 0; }
+.owner-chip:has(input:checked) {
+  background: var(--accent-soft); border-color: var(--accent);
+  color: var(--accent-ink);
+}
 </style>

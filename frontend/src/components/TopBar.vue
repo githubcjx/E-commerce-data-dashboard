@@ -20,6 +20,7 @@ const menuOpen = ref(false);
 
 function roleLabel(role) {
   if (role === "platform_admin") return "平台管理员";
+  if (role === "tenant_super_admin") return "超级管理员";
   if (role === "tenant_admin") return "管理员";
   return "普通用户";
 }

@@ -8,7 +8,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import get_settings
 from .db import get_db
-from .models import ROLE_PLATFORM_ADMIN, ROLE_TENANT_ADMIN, User
+from .models import (
+    BACKEND_ROLES, ROLE_PLATFORM_ADMIN, ROLE_TENANT_ADMIN,
+    ROLE_TENANT_SUPER_ADMIN, User,
+)
 
 settings = get_settings()
 
@@ -56,10 +59,29 @@ async def get_current_user(request: Request, db: AsyncSession = Depends(get_db))
     return user
 
 
-async def require_tenant_admin(user: User = Depends(get_current_user)) -> User:
-    """tenant_admin OR platform_admin — for tenant-scoped user management."""
-    if user.role not in (ROLE_TENANT_ADMIN, ROLE_PLATFORM_ADMIN):
+async def require_backend_access(user: User = Depends(get_current_user)) -> User:
+    """Any role that has access to the /admin backend page.
+
+    Includes platform_admin, tenant_super_admin, tenant_admin (the lesser
+    admin tier). NOT tenant_user. Used as the entry guard — endpoint-level
+    permission (create vs edit, target restrictions) is checked separately.
+    """
+    if user.role not in BACKEND_ROLES:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权访问后台")
+    return user
+
+
+# Backwards-compatible alias. Old code (and external callers) referred to
+# require_tenant_admin meaning "anyone with backend access". Keep the same
+# semantic under the more accurate name above, but expose the alias too.
+require_tenant_admin = require_backend_access
+
+
+async def require_tenant_super_admin(user: User = Depends(get_current_user)) -> User:
+    """tenant_super_admin OR platform_admin — for create/delete/role/scope
+    mutations on users."""
+    if user.role not in (ROLE_TENANT_SUPER_ADMIN, ROLE_PLATFORM_ADMIN):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅超级管理员可执行此操作")
     return user
 
 

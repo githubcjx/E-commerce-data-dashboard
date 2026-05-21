@@ -6,8 +6,12 @@ import {
 } from "../api/client";
 
 export const ROLE_PLATFORM = "platform_admin";
+export const ROLE_TENANT_SUPER = "tenant_super_admin";
 export const ROLE_TENANT_ADMIN = "tenant_admin";
 export const ROLE_TENANT_USER = "tenant_user";
+
+// Roles that can see the /admin backend page.
+const BACKEND_ROLES = new Set([ROLE_PLATFORM, ROLE_TENANT_SUPER, ROLE_TENANT_ADMIN]);
 
 export const useUserStore = defineStore("user", {
   state: () => ({
@@ -17,8 +21,14 @@ export const useUserStore = defineStore("user", {
   getters: {
     isLoggedIn: (s) => !!s.user,
     isPlatformAdmin: (s) => s.user?.role === ROLE_PLATFORM,
-    isTenantAdmin: (s) => s.user?.role === ROLE_TENANT_ADMIN,
-    isAdmin: (s) => s.user?.role === ROLE_PLATFORM || s.user?.role === ROLE_TENANT_ADMIN,
+    // Tenant *super* admin — the original tenant boss.
+    isTenantSuperAdmin: (s) => s.user?.role === ROLE_TENANT_SUPER,
+    // Plain tenant admin — backend access, edit-only on 普通用户.
+    isTenantPlainAdmin: (s) => s.user?.role === ROLE_TENANT_ADMIN,
+    // Any backend-capable user (sees the 后台 link).
+    isAdmin: (s) => BACKEND_ROLES.has(s.user?.role),
+    // Can create / delete / change role / change scope.
+    canManageUsers: (s) => s.user?.role === ROLE_PLATFORM || s.user?.role === ROLE_TENANT_SUPER,
   },
   actions: {
     async login(username, password) {

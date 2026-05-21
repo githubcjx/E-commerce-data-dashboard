@@ -48,6 +48,9 @@ class UserOut(BaseModel):
     role: str
     tenant_id: int | None = None
     display_name: str | None = None
+    # NULL means "unrestricted" (super_admin & platform_admin behave that way
+    # regardless of stored value). An empty list means "scoped to nothing".
+    data_scope_owners: list[str] | None = None
     created_at: datetime
 
     class Config:
@@ -93,8 +96,12 @@ class TenantOut(BaseModel):
 class UserCreate(BaseModel):
     username: str = Field(min_length=2, max_length=64)
     password: str = Field(min_length=6, max_length=128)
+    # Allowed values: "tenant_admin" | "tenant_user". The super_admin role
+    # is *not* assignable here — it's reserved for the initial tenant account.
     role: str = Field(default="tenant_user")
     display_name: str | None = Field(default=None, max_length=64)
+    # NULL = unrestricted (default). List of owner names = scoped view.
+    data_scope_owners: list[str] | None = None
     # Only honored when actor is platform_admin (used from /admin/users?tenant_id=).
     tenant_id: int | None = None
 
@@ -103,6 +110,9 @@ class UserUpdate(BaseModel):
     password: str | None = Field(default=None, min_length=6, max_length=128)
     role: str | None = None
     display_name: str | None = Field(default=None, max_length=64)
+    # Sent as a list to set scope, or as null to clear (= unrestricted).
+    # Omit the key entirely to leave scope unchanged.
+    data_scope_owners: list[str] | None = None
 
 
 # ---------- Import ----------

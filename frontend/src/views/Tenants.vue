@@ -47,7 +47,7 @@ async function submit() {
       ui.showToast("已更新", "success");
     } else {
       if (!form.value.code || !form.value.name || !form.value.admin_username || !form.value.admin_password) {
-        formError.value = "企业短码、名称、首位管理员账号 / 密码均必填";
+        formError.value = "企业短码、名称、超级管理员账号 / 密码均必填";
         return;
       }
       await createTenant({
@@ -131,7 +131,7 @@ onMounted(refresh);
   <div v-if="dialogOpen" class="modal-backdrop" @click.self="dialogOpen = false">
     <div class="modal-card">
       <header class="modal-head">
-        <span class="panel-title">{{ editing ? "编辑企业" : "新增企业 + 首位管理员" }}</span>
+        <span class="panel-title">{{ editing ? "编辑企业" : "新增企业 + 超级管理员" }}</span>
         <button class="btn ghost sm" @click="dialogOpen = false">✕</button>
       </header>
       <div class="modal-body">
@@ -153,13 +153,13 @@ onMounted(refresh);
 
         <template v-if="!editing">
           <hr style="margin:16px 0;border:0;border-top:1px solid var(--divider)" />
-          <div style="font-size:12px;color:var(--ink-3);margin-bottom:10px">为该企业配置一位初始管理员，企业方使用此账号登录：</div>
+          <div style="font-size:12px;color:var(--ink-3);margin-bottom:10px">为该企业配置一位超级管理员（拥有该企业内的最高权限，可创建/管理其他账号）：</div>
           <div class="field">
-            <label>管理员账号</label>
+            <label>超级管理员账号</label>
             <input v-model="form.admin_username" placeholder="alice" />
           </div>
           <div class="field">
-            <label>管理员密码</label>
+            <label>超级管理员密码</label>
             <input type="password" v-model="form.admin_password" placeholder="至少 6 位" />
           </div>
           <div class="field">

@@ -45,7 +45,9 @@ async def kpi(
     db: AsyncSession = Depends(get_db),
 ):
     tid = _tenant_for(user)
-    data = await svc.get_kpis(db, tenant_id=tid, **params)
+    data = await svc.get_kpis(
+        db, tenant_id=tid, scope_owners=svc.effective_scope_owners(user), **params,
+    )
     return ApiResponse(data=data)
 
 
@@ -57,7 +59,10 @@ async def trend(
     db: AsyncSession = Depends(get_db),
 ):
     tid = _tenant_for(user)
-    data = await svc.get_trend(db, tenant_id=tid, metric=metric, **params)
+    data = await svc.get_trend(
+        db, tenant_id=tid, metric=metric,
+        scope_owners=svc.effective_scope_owners(user), **params,
+    )
     return ApiResponse(data=data)
 
 
@@ -73,7 +78,9 @@ async def category(
 ):
     tid = _tenant_for(user)
     data = await svc.get_category_breakdown(
-        db, tid, start_date, end_date, shop_code, owner, subtract_fixed=subtract_fixed,
+        db, tid, start_date, end_date, shop_code, owner,
+        subtract_fixed=subtract_fixed,
+        scope_owners=svc.effective_scope_owners(user),
     )
     return ApiResponse(data=data)
 
@@ -84,5 +91,7 @@ async def filters(
     db: AsyncSession = Depends(get_db),
 ):
     tid = _tenant_for(user)
-    data = await svc.get_filters(db, tid)
+    data = await svc.get_filters(
+        db, tid, scope_owners=svc.effective_scope_owners(user),
+    )
     return ApiResponse(data=data)
