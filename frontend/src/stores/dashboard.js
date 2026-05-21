@@ -4,8 +4,8 @@ import {
   getLayout, saveLayout, getTenantConfig,
 } from "../api/dashboard";
 
-// New: 8 metrics. companyProfitRate is the new one; refundRate keeps the same
-// key but its display label changes to 发货退款率 (label comes from the API).
+// 8 metrics. companyProfitRate is new; refundRate keeps the same key but its
+// display label changes to 发货退款率 (label comes from the API).
 const DEFAULT_ORDER = [
   "sales", "profit", "profitRate", "companyProfitRate",
   "grossMargin", "refundRate", "shipPct", "adPct",
@@ -20,16 +20,30 @@ function daysAgoStr(n) {
   return d.toISOString().slice(0, 10);
 }
 
+// Sparklines on KPI cards just want "some" series points. We bucket
+// adaptively so a 5-year range doesn't crush 1800 daily dots into 200px,
+// and a 7-day range doesn't degenerate to a flat single bar.
+function kpiSparklineGranularity(startStr, endStr) {
+  const days = Math.max(1, Math.round(
+    (new Date(endStr).getTime() - new Date(startStr).getTime()) / 86400000
+  ) + 1);
+  if (days <= 90) return "day";    // ≤ 3 months → daily
+  if (days <= 730) return "week";  // ≤ 2 years → weekly
+  return "month";                  // beyond → monthly
+}
+
 export const useDashboardStore = defineStore("dashboard", {
   state: () => ({
     // Range filter (replaces the single endDate)
     startDate: daysAgoStr(29),
     endDate: todayStr(),
-    granularity: "day",         // day | week | month | year
+    // Trend chart's own bucketing — controlled inside the trend panel.
+    // Does NOT affect the top filter or the KPI cards above.
+    trendGranularity: "day",     // day | week | month | year
     shopCode: "all",
     owner: "all",
     category: "all",
-    subtractFixed: true,         // toggle: 公司利润率 是否减去固定利润率
+    subtractFixed: true,          // 公司利润率 是否减去固定利润率
 
     activeMetric: "sales",
     panelOrder: DEFAULT_ORDER.slice(),
@@ -37,23 +51,23 @@ export const useDashboardStore = defineStore("dashboard", {
 
     kpiItems: [],
     trendPoints: [],
-    trendGranularity: "day",     // granularity the current trendPoints were fetched for
+    trendGranularityServed: "day", // granularity the current trendPoints were fetched for
     categoryRows: [],
     filters: { shops: [], owners: [], categories: [] },
 
     // Period labels surfaced into the UI (KPI cards say "对比 5.1~5.7")
     currentLabel: "",
     previousLabel: "",
-    fixedProfitRate: 0.13,       // server-fetched per tenant
+    fixedProfitRate: 0.13,        // server-fetched per tenant
 
     loading: false,
   }),
   getters: {
-    params(state) {
+    // Shared range/filter params — granularity is added per-call by callers.
+    _baseParams(state) {
       return {
         start_date: state.startDate,
         end_date: state.endDate,
-        granularity: state.granularity,
         shop_code: state.shopCode,
         owner: state.owner,
         category: state.category,
@@ -74,7 +88,9 @@ export const useDashboardStore = defineStore("dashboard", {
       } catch (_) { /* not fatal */ }
     },
     async loadKpi() {
-      const data = await fetchKpi(this.params);
+      // Sparklines auto-bucket by range; independent from trend chart.
+      const granularity = kpiSparklineGranularity(this.startDate, this.endDate);
+      const data = await fetchKpi({ ...this._baseParams, granularity });
       this.kpiItems = data.items || [];
       this.currentLabel = data.current_label || "";
       this.previousLabel = data.previous_label || "";
@@ -83,12 +99,17 @@ export const useDashboardStore = defineStore("dashboard", {
       }
     },
     async loadTrend() {
-      const data = await fetchTrend({ ...this.params, metric: this.activeMetric });
+      // Trend uses the user-chosen granularity from the trend panel.
+      const data = await fetchTrend({
+        ...this._baseParams,
+        granularity: this.trendGranularity,
+        metric: this.activeMetric,
+      });
       this.trendPoints = data.points || [];
-      this.trendGranularity = data.granularity || this.granularity;
+      this.trendGranularityServed = data.granularity || this.trendGranularity;
     },
     async loadCategory() {
-      const { start_date, end_date, shop_code, owner, subtract_fixed } = this.params;
+      const { start_date, end_date, shop_code, owner, subtract_fixed } = this._baseParams;
       this.categoryRows = await fetchCategory({ start_date, end_date, shop_code, owner, subtract_fixed });
     },
     async loadAll() {
@@ -113,6 +134,10 @@ export const useDashboardStore = defineStore("dashboard", {
         }
         if (Array.isArray(parsed.sections)) this.sectionOrder = parsed.sections;
         if (typeof parsed.subtractFixed === "boolean") this.subtractFixed = parsed.subtractFixed;
+        if (typeof parsed.trendGranularity === "string" &&
+            ["day", "week", "month", "year"].includes(parsed.trendGranularity)) {
+          this.trendGranularity = parsed.trendGranularity;
+        }
       } catch (_) { /* ignore */ }
     },
     async persistLayout() {
@@ -120,6 +145,7 @@ export const useDashboardStore = defineStore("dashboard", {
         order: this.panelOrder,
         sections: this.sectionOrder,
         subtractFixed: this.subtractFixed,
+        trendGranularity: this.trendGranularity,
       }));
     },
     resetLayout() {
@@ -128,8 +154,16 @@ export const useDashboardStore = defineStore("dashboard", {
       this.persistLayout();
     },
     setActiveMetric(k) {
+      // Click a KPI card → trend chart redraws for that metric. Granularity
+      // and filters stay put.
       this.activeMetric = k;
       this.loadTrend();
+    },
+    async setTrendGranularity(g) {
+      this.trendGranularity = g;
+      // Only the trend chart reloads — KPI cards & category table don't
+      // depend on this control.
+      await Promise.all([this.persistLayout(), this.loadTrend()]);
     },
     async setSubtractFixed(v) {
       this.subtractFixed = !!v;

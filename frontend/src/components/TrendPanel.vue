@@ -8,7 +8,6 @@ const props = defineProps({
   metricDefs: Array,
   points: Array,
 });
-const emit = defineEmits(["active", "drag-handle-armed"]);
 
 const store = useDashboardStore();
 const def = computed(() =>
@@ -17,34 +16,43 @@ const def = computed(() =>
   { key: "sales", label: "销售额", format: "currency" }
 );
 
-const granularityLabel = computed(() => ({
-  day: "日K", week: "周K", month: "月K", year: "年K",
-}[store.trendGranularity || store.granularity] || ""));
+// Trend-chart bucketing — controls *only* the chart below, not the global
+// filter. Same idea as K-line "日/周/月/年" toggles on stock charts.
+const granularities = [
+  ["day", "日"],
+  ["week", "周"],
+  ["month", "月"],
+  ["year", "年"],
+];
+
+function onGranularity(k) {
+  if (store.trendGranularity === k) return;
+  store.setTrendGranularity(k);
+}
 </script>
 
 <template>
   <section class="panel">
     <header class="panel-head">
-      <span class="panel-title">{{ def.label }}</span>
-      <span class="panel-subtitle">{{ granularityLabel }} 趋势 · 拖动底部滚动条或鼠标滚轮缩放</span>
+      <span class="panel-title">{{ def.label }} 趋势</span>
+      <span class="panel-subtitle">拖动底部滑块或鼠标滚轮缩放</span>
       <div class="panel-actions">
+        <div class="seg" role="tablist">
+          <button
+            v-for="[k, l] in granularities" :key="k"
+            :class="['seg-btn', { 'is-active': store.trendGranularity === k }]"
+            @click="onGranularity(k)"
+          >{{ l }}</button>
+        </div>
         <slot name="handle" />
       </div>
     </header>
     <div class="panel-body">
-      <div class="chip-row">
-        <button
-          v-for="m in metricDefs"
-          :key="m.key"
-          :class="['chip', { 'is-active': m.key === activeKey }]"
-          @click="emit('active', m.key)"
-        >{{ m.label }}</button>
-      </div>
       <TrendChart
         :points="points"
         :format="def.format"
         :label="def.label"
-        :granularity="store.trendGranularity || store.granularity"
+        :granularity="store.trendGranularityServed || store.trendGranularity"
       />
     </div>
   </section>

@@ -5,14 +5,6 @@ import { useDashboardStore } from "../stores/dashboard";
 const store = useDashboardStore();
 const emit = defineEmits(["reset"]);
 
-// K-line vibe: 日K / 周K / 月K / 年K
-const granularities = [
-  ["day", "日K"],
-  ["week", "周K"],
-  ["month", "月K"],
-  ["year", "年K"],
-];
-
 const shops = computed(() => [{ code: "all", name: "全部" }, ...(store.filters.shops || [])]);
 const owners = computed(() => ["all", ...(store.filters.owners || [])]);
 const cats = computed(() => ["all", ...(store.filters.categories || [])]);
@@ -24,19 +16,10 @@ async function refresh() {
   await store.loadAll();
 }
 
-async function onGranularity(k) {
-  if (store.granularity === k) return;
-  store.granularity = k;
-  // Adjust default window to match the typical K-line span for the new
-  // granularity, but only when the user is sitting on the previous default.
-  // We keep user-explicit ranges untouched (they probably just changed
-  // granularity to look at a different bucketing of the same span).
-  await refresh();
-}
-
 async function onShop(v) { store.shopCode = v; await refresh(); }
 async function onOwner(v) { store.owner = v; await refresh(); }
 async function onCat(v) { store.category = v; await refresh(); }
+
 async function onStart(v) {
   if (!v) return;
   store.startDate = v;
@@ -77,14 +60,6 @@ async function presetThisYear() {
 
 <template>
   <div class="filter-row">
-    <div class="seg" role="tablist">
-      <button
-        v-for="[k, l] in granularities" :key="k"
-        :class="['seg-btn', { 'is-active': store.granularity === k }]"
-        @click="onGranularity(k)"
-      >{{ l }}</button>
-    </div>
-
     <div class="filter-group">
       <span class="filter-label">店铺</span>
       <select class="select" :value="store.shopCode" @change="onShop($event.target.value)">
