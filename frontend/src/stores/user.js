@@ -29,6 +29,9 @@ export const useUserStore = defineStore("user", {
     isAdmin: (s) => BACKEND_ROLES.has(s.user?.role),
     // Can create / delete / change role / change scope.
     canManageUsers: (s) => s.user?.role === ROLE_PLATFORM || s.user?.role === ROLE_TENANT_SUPER,
+    // Can use the import feature. 普通用户 are hidden from it entirely;
+    // platform_admin has no own tenant so they can't import either.
+    canImport: (s) => s.user?.role === ROLE_TENANT_SUPER || s.user?.role === ROLE_TENANT_ADMIN,
   },
   actions: {
     async login(username, password) {

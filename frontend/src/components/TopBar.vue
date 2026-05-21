@@ -48,7 +48,12 @@ function gotoAdmin() {
 
       <div v-if="!userStore.isPlatformAdmin" class="tabs" role="tablist">
         <button :class="['tab', { 'is-active': isDashboard }]" @click="router.push({ name: 'dashboard' })">看板</button>
-        <button :class="['tab', { 'is-active': isImport }]" @click="router.push({ name: 'import' })">导入</button>
+        <!-- 导入 hidden from 普通用户 — only super_admin / plain admin can import. -->
+        <button
+          v-if="userStore.canImport"
+          :class="['tab', { 'is-active': isImport }]"
+          @click="router.push({ name: 'import' })"
+        >导入</button>
       </div>
 
       <div class="topbar-right">

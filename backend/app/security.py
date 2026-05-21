@@ -85,6 +85,16 @@ async def require_tenant_super_admin(user: User = Depends(get_current_user)) -> 
     return user
 
 
+async def require_import_access(user: User = Depends(get_current_user)) -> User:
+    """super_admin or plain tenant_admin — the two roles allowed to use the
+    import feature (upload Excel, view history, rollback). Excludes
+    tenant_user (no import) and platform_admin (no own tenant data).
+    """
+    if user.role not in (ROLE_TENANT_SUPER_ADMIN, ROLE_TENANT_ADMIN):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅管理员可使用导入功能")
+    return user
+
+
 async def require_platform_admin(user: User = Depends(get_current_user)) -> User:
     if user.role != ROLE_PLATFORM_ADMIN:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅平台管理员可执行此操作")

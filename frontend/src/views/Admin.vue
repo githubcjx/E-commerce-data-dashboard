@@ -325,8 +325,15 @@ watch(() => route.query.tenant_id, async () => { await refresh(); await loadOwne
           </td>
           <td style="text-align:left" class="t-muted">{{ new Date(u.created_at).toLocaleString("zh-CN", { hour12: false }) }}</td>
           <td>
-            <button class="btn ghost sm" :disabled="!canEditTarget(u)" @click="openEdit(u)">编辑</button>
-            <button class="btn ghost sm" :disabled="!canDeleteTarget(u)" @click="remove(u)" style="color:var(--neg)">删除</button>
+            <!-- Hide rather than disable: a plain admin viewing another admin
+                 just sees an empty action cell, no greyed-out distraction. -->
+            <button v-if="canEditTarget(u)" class="btn ghost sm" @click="openEdit(u)">编辑</button>
+            <button v-if="canDeleteTarget(u)" class="btn ghost sm" @click="remove(u)" style="color:var(--neg)">删除</button>
+            <span
+              v-if="!canEditTarget(u) && !canDeleteTarget(u)"
+              class="t-muted"
+              style="font-size:12px"
+            >—</span>
           </td>
         </tr>
         <tr v-if="!loading && !users.length">

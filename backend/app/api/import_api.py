@@ -10,7 +10,7 @@ from ..config import get_settings
 from ..db import get_db
 from ..models import ImportBatch, ROLE_PLATFORM_ADMIN, User
 from ..schemas import ApiResponse, ImportBatchOut
-from ..security import get_current_user
+from ..security import require_import_access
 from ..services.import_service import rollback_batch, run_import
 
 router = APIRouter(prefix="/api/import", tags=["import"])
@@ -33,7 +33,7 @@ def _tenant_for(user: User) -> int:
 async def upload(
     background: BackgroundTasks,
     file: UploadFile = File(...),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_import_access),
     db: AsyncSession = Depends(get_db),
 ):
     tenant_id = _tenant_for(user)
@@ -69,7 +69,7 @@ async def upload(
 @router.get("/batches/{batch_id}", response_model=ApiResponse[ImportBatchOut])
 async def get_batch(
     batch_id: str,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_import_access),
     db: AsyncSession = Depends(get_db),
 ):
     row = (await db.execute(select(ImportBatch).where(ImportBatch.id == batch_id))).scalar_one_or_none()
@@ -83,7 +83,7 @@ async def get_batch(
 @router.get("/batches", response_model=ApiResponse[list[ImportBatchOut]])
 async def list_batches(
     limit: int = 30,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_import_access),
     db: AsyncSession = Depends(get_db),
 ):
     tenant_id = _tenant_for(user)
@@ -99,7 +99,7 @@ async def list_batches(
 @router.delete("/batches/{batch_id}", response_model=ApiResponse[dict])
 async def rollback(
     batch_id: str,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_import_access),
     db: AsyncSession = Depends(get_db),
 ):
     tenant_id = _tenant_for(user)

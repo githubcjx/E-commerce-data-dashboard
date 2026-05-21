@@ -4,11 +4,18 @@ import { ROLE_PLATFORM, ROLE_TENANT_SUPER, ROLE_TENANT_ADMIN } from "../stores/u
 
 // Roles allowed into /admin/users (backend access).
 const BACKEND_ROLES = new Set([ROLE_PLATFORM, ROLE_TENANT_SUPER, ROLE_TENANT_ADMIN]);
+// Roles allowed to use the import feature.
+const IMPORT_ROLES = new Set([ROLE_TENANT_SUPER, ROLE_TENANT_ADMIN]);
 
 const routes = [
   { path: "/login", name: "login", component: () => import("../views/Login.vue") },
   { path: "/", name: "dashboard", component: () => import("../views/Dashboard.vue") },
-  { path: "/import", name: "import", component: () => import("../views/Import.vue") },
+  {
+    path: "/import",
+    name: "import",
+    component: () => import("../views/Import.vue"),
+    meta: { requiresImport: true },
+  },
   {
     path: "/admin/tenants",
     name: "tenants",
@@ -46,6 +53,11 @@ router.beforeEach((to) => {
   if (to.meta?.requiresPlatform && u?.role !== ROLE_PLATFORM) return { name: "dashboard" };
   if (to.meta?.requiresAdmin) {
     if (!u || !BACKEND_ROLES.has(u.role)) {
+      return { name: "dashboard" };
+    }
+  }
+  if (to.meta?.requiresImport) {
+    if (!u || !IMPORT_ROLES.has(u.role)) {
       return { name: "dashboard" };
     }
   }
