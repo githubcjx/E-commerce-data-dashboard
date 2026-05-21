@@ -66,6 +66,8 @@ export const useDashboardStore = defineStore("dashboard", {
     // Top filter — drives EVERYTHING: KPI range, category table range, AND
     // trend chart range + bucketing. The dashboard reads as one slice of
     // time, no more independent "trend has its own view" weirdness.
+    // Picker shape per tab: 日/月/年 = start + end; 周 = start week + end
+    // week. Clicking a tab snaps the range to "this period".
     topGranularity: "day",       // day | week | month | year
     startDate: todayStr(),
     endDate: todayStr(),

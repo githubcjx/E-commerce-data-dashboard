@@ -85,7 +85,8 @@ function monthStrToBounds(monthStr) {
 // ---------------------------------------------------------------------------
 // Bound the input values back to display from store.startDate / endDate
 // ---------------------------------------------------------------------------
-const weekValue   = computed(() => dateToWeekStr(parseIso(store.startDate) || new Date()));
+const weekStartValue  = computed(() => dateToWeekStr(parseIso(store.startDate) || new Date()));
+const weekEndValue    = computed(() => dateToWeekStr(parseIso(store.endDate)   || new Date()));
 const monthStartValue = computed(() => dateToMonthStr(parseIso(store.startDate) || new Date()));
 const monthEndValue   = computed(() => dateToMonthStr(parseIso(store.endDate)   || new Date()));
 const yearStartValue  = computed(() => (parseIso(store.startDate) || new Date()).getFullYear());
@@ -104,10 +105,20 @@ async function onDayEnd(v) {
   const start = v < store.startDate ? v : store.startDate;
   await store.setRange(start, v);
 }
-async function onWeek(v) {
+async function onWeekStart(v) {
   const r = weekStrToRange(v);
   if (!r) return;
-  await store.setRange(toIso(r[0]), toIso(r[1]));
+  const startIso = toIso(r[0]);
+  // If new start is past the current end, pull the end to this week's end too.
+  const endStr = startIso > store.endDate ? toIso(r[1]) : store.endDate;
+  await store.setRange(startIso, endStr);
+}
+async function onWeekEnd(v) {
+  const r = weekStrToRange(v);
+  if (!r) return;
+  const endIso = toIso(r[1]);
+  const startStr = endIso < store.startDate ? toIso(r[0]) : store.startDate;
+  await store.setRange(startStr, endIso);
 }
 async function onMonthStart(v) {
   if (!v) return;
@@ -187,10 +198,13 @@ async function onYearEnd(v) {
           min="2024-01-01" max="2030-12-31" />
       </template>
 
-      <!-- 周: single week -->
+      <!-- 周: start + end week (range) -->
       <template v-else-if="store.topGranularity === 'week'">
         <input type="week" class="date-input week-input"
-          :value="weekValue" @change="onWeek($event.target.value)" />
+          :value="weekStartValue" @change="onWeekStart($event.target.value)" />
+        <span class="range-sep">→</span>
+        <input type="week" class="date-input week-input"
+          :value="weekEndValue" @change="onWeekEnd($event.target.value)" />
       </template>
 
       <!-- 月: start + end month -->
