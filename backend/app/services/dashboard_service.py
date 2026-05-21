@@ -407,4 +407,15 @@ async def get_filters(session, tenant_id):
             select(SalesRecord.category).where(SalesRecord.tenant_id == tenant_id).distinct()
         )).all() if c
     )
-    return {"shops": shops, "owners": owners, "categories": cats}
+    # Earliest / latest data dates. Frontend uses these to span the year-mode
+    # trend chart across all years of available data.
+    bounds = (await session.execute(
+        select(func.min(SalesRecord.date), func.max(SalesRecord.date))
+        .where(SalesRecord.tenant_id == tenant_id)
+    )).one()
+    date_min = bounds[0].isoformat() if bounds[0] else None
+    date_max = bounds[1].isoformat() if bounds[1] else None
+    return {
+        "shops": shops, "owners": owners, "categories": cats,
+        "date_min": date_min, "date_max": date_max,
+    }

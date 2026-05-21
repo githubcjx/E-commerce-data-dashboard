@@ -49,6 +49,28 @@ function defaultRangeFor(top) {
   return [todayStr(), todayStr()]; // day
 }
 
+// Trend chart's *own* date range — independent from the user-selected
+// top filter. Per requirement:
+//   日/周/月 → 今年 1.1 ~ 12.31
+//   年        → 数据库里所有年份（[date_min, date_max] from /filters）
+// The user-selected top range is used only as a *highlight cursor* on top
+// of this fixed view (see TrendChart markArea).
+function trendRangeFor(trendGran, dateMin, dateMax) {
+  const now = new Date();
+  if (trendGran === "year") {
+    // Earliest/latest dates from /filters; fall back to a 5-year window if
+    // the tenant has no data yet.
+    const start = dateMin || toIso(new Date(now.getFullYear() - 4, 0, 1));
+    const end   = dateMax || toIso(new Date(now.getFullYear(), 11, 31));
+    // Pad to year boundaries so year-mode buckets are clean.
+    const sY = Number(start.slice(0, 4));
+    const eY = Number(end.slice(0, 4));
+    return [`${sY}-01-01`, `${eY}-12-31`];
+  }
+  // day | week | month: this whole calendar year
+  return [toIso(startOfYear(now)), toIso(endOfYear(now))];
+}
+
 // Sparklines on KPI cards just want "some" series points. We bucket
 // adaptively so a 5-year range doesn't crush 1800 daily dots into 200px,
 // and a 7-day range doesn't degenerate to a flat single bar.
@@ -85,8 +107,9 @@ export const useDashboardStore = defineStore("dashboard", {
     kpiItems: [],
     trendPoints: [],
     trendGranularityServed: "day", // granularity the current trendPoints were fetched for
+    trendRangeServed: ["", ""],    // [start, end] range the current trendPoints were fetched for
     categoryRows: [],
-    filters: { shops: [], owners: [], categories: [] },
+    filters: { shops: [], owners: [], categories: [], date_min: null, date_max: null },
 
     // Period labels surfaced into the UI (KPI cards say "对比 5.1~5.7")
     currentLabel: "",
@@ -132,14 +155,28 @@ export const useDashboardStore = defineStore("dashboard", {
       }
     },
     async loadTrend() {
-      // Trend uses the user-chosen granularity from the trend panel.
+      // Trend chart's range is *independent* from the user-selected top
+      // range. Day/week/month always show the full current year; year shows
+      // every year of available data. The user's top range becomes a
+      // highlight overlay on top (handled in TrendChart, not here).
+      const [trendStart, trendEnd] = trendRangeFor(
+        this.trendGranularity,
+        this.filters.date_min,
+        this.filters.date_max,
+      );
       const data = await fetchTrend({
-        ...this._baseParams,
+        start_date: trendStart,
+        end_date: trendEnd,
         granularity: this.trendGranularity,
+        shop_code: this.shopCode,
+        owner: this.owner,
+        category: this.category,
+        subtract_fixed: this.subtractFixed,
         metric: this.activeMetric,
       });
       this.trendPoints = data.points || [];
       this.trendGranularityServed = data.granularity || this.trendGranularity;
+      this.trendRangeServed = [trendStart, trendEnd];
     },
     async loadCategory() {
       const { start_date, end_date, shop_code, owner, subtract_fixed } = this._baseParams;
@@ -149,6 +186,17 @@ export const useDashboardStore = defineStore("dashboard", {
       this.loading = true;
       try {
         await Promise.all([this.loadKpi(), this.loadTrend(), this.loadCategory()]);
+      } finally {
+        this.loading = false;
+      }
+    },
+    async loadKpiAndCategory() {
+      // For top-range-only changes: trend has its own fixed range so the
+      // chart data doesn't change — we only need to refresh the cards and
+      // the category table. The chart visually retargets the highlight.
+      this.loading = true;
+      try {
+        await Promise.all([this.loadKpi(), this.loadCategory()]);
       } finally {
         this.loading = false;
       }
@@ -211,19 +259,21 @@ export const useDashboardStore = defineStore("dashboard", {
     },
     async setTopGranularity(g) {
       // Top tab click: switch granularity AND snap to "this period" so the
-      // user lands on today / this-week / this-month / this-year.
+      // user lands on today / this-week / this-month / this-year. Trend
+      // chart data doesn't change (its range is fixed); only the highlight
+      // overlay shifts.
       this.topGranularity = g;
       const [s, e] = defaultRangeFor(g);
       this.startDate = s;
       this.endDate = e;
-      await Promise.all([this.persistLayout(), this.loadAll()]);
+      await Promise.all([this.persistLayout(), this.loadKpiAndCategory()]);
     },
     async setRange(start, end) {
-      // Picker change. Caller is responsible for swap/clamp logic, we just
-      // store + reload.
+      // Picker change. Caller handles swap/clamp; we just store + reload
+      // the KPI cards and category table — trend chart stays put.
       this.startDate = start;
       this.endDate = end;
-      await this.loadAll();
+      await this.loadKpiAndCategory();
     },
     async setSubtractFixed(v) {
       this.subtractFixed = !!v;
