@@ -12,15 +12,17 @@ export function formatValue(v, fmt) {
   return String(v);
 }
 
-export function formatDelta(curr, prev, higherIsBetter) {
+export function formatDelta(curr, prev, _higherIsBetter) {
+  // Color follows raw direction (涨 = up = red, 跌 = down = green) regardless
+  // of whether "up" is semantically good for this metric — this matches the
+  // Chinese stock-chart convention the user requested.
   if (prev === 0 && curr === 0) return { sign: "flat", text: "0.00%", arrow: "→" };
   if (prev === 0 || prev === null || prev === undefined) return { sign: "flat", text: "—", arrow: "→" };
   const pct = ((curr - prev) / Math.abs(prev)) * 100;
   if (Math.abs(pct) < 0.005) return { sign: "flat", text: "0.00%", arrow: "→" };
   const isUp = pct > 0;
-  const good = higherIsBetter ? isUp : !isUp;
   return {
-    sign: good ? "up" : "down",
+    sign: isUp ? "up" : "down",
     text: (pct > 0 ? "+" : "") + pct.toFixed(2) + "%",
     arrow: isUp ? "↑" : "↓",
   };

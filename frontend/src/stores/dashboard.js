@@ -12,12 +12,41 @@ const DEFAULT_ORDER = [
 ];
 const DEFAULT_SECTIONS = ["trend", "categoryTable"];
 
-// Default time window: last 30 days ending today.
+// Default time window: today (top filter defaults to "日 · 今天").
 function todayStr() { return new Date().toISOString().slice(0, 10); }
-function daysAgoStr(n) {
-  const d = new Date();
-  d.setDate(d.getDate() - n);
-  return d.toISOString().slice(0, 10);
+function toIso(d) {
+  // Local-time ISO date (avoid the UTC drift toISOString() would introduce
+  // for dates near midnight).
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+// ISO week start = Monday in China-style calendars.
+function startOfWeek(d) {
+  const x = new Date(d);
+  const wd = (x.getDay() + 6) % 7; // 0 = Monday
+  x.setDate(x.getDate() - wd);
+  return x;
+}
+function endOfWeek(d) {
+  const s = startOfWeek(d);
+  s.setDate(s.getDate() + 6);
+  return s;
+}
+function startOfMonth(d) { return new Date(d.getFullYear(), d.getMonth(), 1); }
+function endOfMonth(d)   { return new Date(d.getFullYear(), d.getMonth() + 1, 0); }
+function startOfYear(d)  { return new Date(d.getFullYear(), 0, 1); }
+function endOfYear(d)    { return new Date(d.getFullYear(), 11, 31); }
+
+// "this period" for each top-granularity. Returns ISO date strings.
+function defaultRangeFor(top) {
+  const now = new Date();
+  if (top === "week")  return [toIso(startOfWeek(now)),  toIso(endOfWeek(now))];
+  if (top === "month") return [toIso(startOfMonth(now)), toIso(endOfMonth(now))];
+  if (top === "year")  return [toIso(startOfYear(now)),  toIso(endOfYear(now))];
+  return [todayStr(), todayStr()]; // day
 }
 
 // Sparklines on KPI cards just want "some" series points. We bucket
@@ -34,11 +63,15 @@ function kpiSparklineGranularity(startStr, endStr) {
 
 export const useDashboardStore = defineStore("dashboard", {
   state: () => ({
-    // Range filter (replaces the single endDate)
-    startDate: daysAgoStr(29),
+    // Top filter: which "period" the user is looking at. Picks the shape of
+    // the date picker AND the default range when the tab is clicked. The
+    // user can still adjust the picker to broaden the selection (except for
+    // 周 — that one is single-week by design).
+    topGranularity: "day",       // day | week | month | year
+    startDate: todayStr(),
     endDate: todayStr(),
     // Trend chart's own bucketing — controlled inside the trend panel.
-    // Does NOT affect the top filter or the KPI cards above.
+    // Independent of topGranularity above.
     trendGranularity: "day",     // day | week | month | year
     shopCode: "all",
     owner: "all",
@@ -138,6 +171,16 @@ export const useDashboardStore = defineStore("dashboard", {
             ["day", "week", "month", "year"].includes(parsed.trendGranularity)) {
           this.trendGranularity = parsed.trendGranularity;
         }
+        if (typeof parsed.topGranularity === "string" &&
+            ["day", "week", "month", "year"].includes(parsed.topGranularity)) {
+          this.topGranularity = parsed.topGranularity;
+          // Snap range to current "this period" for the persisted top tab —
+          // otherwise the stored range may be stale (yesterday on a 日 tab,
+          // last week on 周, etc.) and the user lands on the wrong slice.
+          const [s, e] = defaultRangeFor(parsed.topGranularity);
+          this.startDate = s;
+          this.endDate = e;
+        }
       } catch (_) { /* ignore */ }
     },
     async persistLayout() {
@@ -146,6 +189,7 @@ export const useDashboardStore = defineStore("dashboard", {
         sections: this.sectionOrder,
         subtractFixed: this.subtractFixed,
         trendGranularity: this.trendGranularity,
+        topGranularity: this.topGranularity,
       }));
     },
     resetLayout() {
@@ -164,6 +208,22 @@ export const useDashboardStore = defineStore("dashboard", {
       // Only the trend chart reloads — KPI cards & category table don't
       // depend on this control.
       await Promise.all([this.persistLayout(), this.loadTrend()]);
+    },
+    async setTopGranularity(g) {
+      // Top tab click: switch granularity AND snap to "this period" so the
+      // user lands on today / this-week / this-month / this-year.
+      this.topGranularity = g;
+      const [s, e] = defaultRangeFor(g);
+      this.startDate = s;
+      this.endDate = e;
+      await Promise.all([this.persistLayout(), this.loadAll()]);
+    },
+    async setRange(start, end) {
+      // Picker change. Caller is responsible for swap/clamp logic, we just
+      // store + reload.
+      this.startDate = start;
+      this.endDate = end;
+      await this.loadAll();
     },
     async setSubtractFixed(v) {
       this.subtractFixed = !!v;

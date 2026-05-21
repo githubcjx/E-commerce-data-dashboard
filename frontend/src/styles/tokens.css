@@ -19,10 +19,19 @@
   --accent-ink:   oklch(38% 0.16 258);
   --accent-line:  oklch(54% 0.17 258 / 0.18);
 
+  /* Semantic success / error — used by tags, toasts, status dots. */
   --pos:          oklch(54% 0.10 150);
   --pos-soft:     oklch(96% 0.03 150);
   --neg:          oklch(56% 0.16 30);
   --neg-soft:     oklch(96% 0.03 30);
+
+  /* Stock-market style 涨跌 — used by KPI deltas, sparklines, profit cells.
+     Chinese convention: 涨 (positive change) = red, 跌 (negative) = green.
+     Distinct tokens from --pos/--neg so "success" tags stay green. */
+  --gain:         oklch(56% 0.16 30);   /* same hue as --neg (red) */
+  --gain-soft:    oklch(96% 0.03 30);
+  --loss:         oklch(54% 0.10 150);  /* same hue as --pos (green) */
+  --loss-soft:    oklch(96% 0.03 150);
 
   --font-sans:    "Manrope", -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", "Microsoft YaHei", sans-serif;
   --font-mono:    "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;

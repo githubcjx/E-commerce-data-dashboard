@@ -32,9 +32,10 @@ const paths = computed(() => {
   return { line, area };
 });
 
+// 涨 = red, 跌 = green (Chinese stock convention).
 const color = computed(() =>
-  props.trend === "up" ? "var(--pos)" :
-  props.trend === "down" ? "var(--neg)" : "var(--ink-4)"
+  props.trend === "up" ? "var(--gain)" :
+  props.trend === "down" ? "var(--loss)" : "var(--ink-4)"
 );
 </script>
 

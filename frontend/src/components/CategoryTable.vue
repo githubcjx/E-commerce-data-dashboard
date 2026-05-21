@@ -1,10 +1,15 @@
 <script setup>
 import { computed, ref } from "vue";
 import { formatValue } from "../utils/format";
+import { useDashboardStore } from "../stores/dashboard";
 
 const props = defineProps({ rows: { type: Array, required: true } });
+const store = useDashboardStore();
 const sortKey = ref("sales");
 const sortDir = ref("desc");
+
+// 环比对比的具体日期范围 — e.g. "2025-05-01 ~ 2025-05-07"
+const prevLabel = computed(() => store.previousLabel || "上期");
 
 const sorted = computed(() => {
   const arr = (props.rows || []).slice();
@@ -57,11 +62,17 @@ function delta(v) {
           <th style="cursor:pointer" @click="sortBy('sales')">
             销售额 <span class="sort-mark">{{ arrow("sales") }}</span>
           </th>
-          <th>销售额环比</th>
+          <th>
+            <div>销售额环比</div>
+            <div class="prev-sub">对比 {{ prevLabel }}</div>
+          </th>
           <th style="cursor:pointer" @click="sortBy('profit')">
             利润额 <span class="sort-mark">{{ arrow("profit") }}</span>
           </th>
-          <th>利润额环比</th>
+          <th>
+            <div>利润额环比</div>
+            <div class="prev-sub">对比 {{ prevLabel }}</div>
+          </th>
           <th style="cursor:pointer" @click="sortBy('company_profit_rate')">
             公司利润率 <span class="sort-mark">{{ arrow("company_profit_rate") }}</span>
           </th>
@@ -104,4 +115,8 @@ function delta(v) {
 <style scoped>
 .cat-tbl th, .cat-tbl td { white-space: nowrap; }
 .sort-mark { margin-left: 6px; color: var(--ink-5); font-family: var(--font-mono); }
+.prev-sub {
+  font-size: 11px; font-weight: 400; color: var(--ink-5);
+  font-family: var(--font-mono); margin-top: 2px;
+}
 </style>
