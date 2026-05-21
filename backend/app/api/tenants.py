@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -6,8 +8,10 @@ from ..db import get_db
 from ..models import (
     ROLE_TENANT_ADMIN, TENANT_STATUS_ACTIVE, TENANT_STATUS_DISABLED, Tenant, User,
 )
-from ..schemas import ApiResponse, TenantCreate, TenantOut, TenantUpdate
-from ..security import hash_password, require_platform_admin
+from ..schemas import (
+    ApiResponse, TenantConfigOut, TenantConfigUpdate, TenantCreate, TenantOut, TenantUpdate,
+)
+from ..security import get_current_user, hash_password, require_platform_admin, require_tenant_admin
 
 router = APIRouter(prefix="/api/tenants", tags=["tenants"])
 
@@ -91,6 +95,43 @@ async def update_tenant(
     await db.commit()
     await db.refresh(tenant)
     return ApiResponse(data=TenantOut.model_validate(tenant))
+
+
+@router.get("/me/config", response_model=ApiResponse[TenantConfigOut])
+async def get_my_tenant_config(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Tenant-scoped read of dashboard config. Any logged-in tenant user can
+    read it (the dashboard needs it to render 公司利润率). Updates are restricted
+    to tenant_admin below.
+    """
+    if user.tenant_id is None:
+        raise HTTPException(status_code=400, detail="平台管理员请在企业内访问")
+    tenant = (await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))).scalar_one_or_none()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="企业不存在")
+    return ApiResponse(data=TenantConfigOut(fixed_profit_rate=float(tenant.fixed_profit_rate or Decimal("0.13"))))
+
+
+@router.put("/me/config", response_model=ApiResponse[TenantConfigOut])
+async def update_my_tenant_config(
+    body: TenantConfigUpdate,
+    actor: User = Depends(require_tenant_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Only tenant_admin (or platform_admin) of THIS tenant can change the
+    固定利润率. platform_admin can also reach in here from any tenant.
+    """
+    if actor.tenant_id is None:
+        raise HTTPException(status_code=400, detail="平台管理员请在企业内执行此操作")
+    tenant = (await db.execute(select(Tenant).where(Tenant.id == actor.tenant_id))).scalar_one_or_none()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="企业不存在")
+    tenant.fixed_profit_rate = Decimal(str(body.fixed_profit_rate)).quantize(Decimal("0.0001"))
+    await db.commit()
+    await db.refresh(tenant)
+    return ApiResponse(data=TenantConfigOut(fixed_profit_rate=float(tenant.fixed_profit_rate)))
 
 
 @router.delete("/{tenant_id}", response_model=ApiResponse[dict])

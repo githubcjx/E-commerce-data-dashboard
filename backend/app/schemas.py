@@ -29,6 +29,19 @@ class TenantBrief(BaseModel):
         from_attributes = True
 
 
+class TenantConfigOut(BaseModel):
+    """Per-tenant dashboard configuration the tenant_admin can tune."""
+    fixed_profit_rate: float = 0.13
+
+    class Config:
+        from_attributes = True
+
+
+class TenantConfigUpdate(BaseModel):
+    # Stored as NUMERIC(6, 4); 0 ≤ x < 1 covers any plausible business setting.
+    fixed_profit_rate: float = Field(..., ge=0, lt=1)
+
+
 class UserOut(BaseModel):
     id: int
     username: str

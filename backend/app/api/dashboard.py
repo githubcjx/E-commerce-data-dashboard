@@ -19,18 +19,22 @@ def _tenant_for(user: User) -> int:
 
 
 def _common(
-    end_date: date = Query(..., description="结束日期"),
-    granularity: str = Query("day", regex="^(day|week|month)$"),
+    start_date: date = Query(..., description="范围起"),
+    end_date: date = Query(..., description="范围止"),
+    granularity: str = Query("day", regex="^(day|week|month|year)$"),
     shop_code: str = Query("all"),
     owner: str = Query("all"),
     category: str = Query("all"),
+    subtract_fixed: bool = Query(True, description="公司利润率是否减去固定利润率"),
 ):
     return {
+        "start_date": start_date,
         "end_date": end_date,
         "granularity": granularity,
         "shop_code": shop_code,
         "owner": owner,
         "category": category,
+        "subtract_fixed": subtract_fixed,
     }
 
 
@@ -59,15 +63,18 @@ async def trend(
 
 @router.get("/category", response_model=ApiResponse[list[dict]])
 async def category(
+    start_date: date = Query(...),
     end_date: date = Query(...),
-    granularity: str = Query("day", regex="^(day|week|month)$"),
     shop_code: str = Query("all"),
     owner: str = Query("all"),
+    subtract_fixed: bool = Query(True),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     tid = _tenant_for(user)
-    data = await svc.get_category_breakdown(db, tid, end_date, granularity, shop_code, owner)
+    data = await svc.get_category_breakdown(
+        db, tid, start_date, end_date, shop_code, owner, subtract_fixed=subtract_fixed,
+    )
     return ApiResponse(data=data)
 
 

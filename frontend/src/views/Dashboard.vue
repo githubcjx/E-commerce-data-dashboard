@@ -49,8 +49,7 @@ function onReset() {
 }
 
 onMounted(async () => {
-  await store.loadFilters();
-  await store.loadLayout();
+  await Promise.all([store.loadFilters(), store.loadLayout(), store.loadTenantConfig()]);
   await store.loadAll();
 });
 

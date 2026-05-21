@@ -14,12 +14,12 @@ const sorted = computed(() => {
     if (typeof va === "string") {
       return sortDir.value === "asc" ? va.localeCompare(vb) : vb.localeCompare(va);
     }
-    return sortDir.value === "asc" ? va - vb : vb - va;
+    return sortDir.value === "asc" ? (va ?? 0) - (vb ?? 0) : (vb ?? 0) - (va ?? 0);
   });
   return arr;
 });
 
-const maxSales = computed(() => Math.max(1, ...(props.rows || []).map((r) => r.sales)));
+const maxSales = computed(() => Math.max(1, ...(props.rows || []).map((r) => r.sales || 0)));
 
 function sortBy(key) {
   if (sortKey.value === key) sortDir.value = sortDir.value === "asc" ? "desc" : "asc";
@@ -29,6 +29,14 @@ function arrow(key) {
   if (sortKey.value !== key) return "";
   return sortDir.value === "asc" ? "↑" : "↓";
 }
+
+// 环比 cell — show "+12.34%" / "−5.67%" / "—"
+function delta(v) {
+  if (v === null || v === undefined) return { text: "—", cls: "t-muted" };
+  const sign = v >= 0 ? "+" : "−";
+  const cls = v > 0 ? "t-pos" : v < 0 ? "t-neg" : "t-muted";
+  return { text: `${sign}${Math.abs(v).toFixed(2)}%`, cls };
+}
 </script>
 
 <template>
@@ -37,18 +45,35 @@ function arrow(key) {
       <span class="panel-title">类目分类汇总</span>
       <span class="panel-subtitle">按销售额排序 · 共 {{ rows.length }} 项</span>
       <div class="panel-actions">
-        <button class="btn ghost sm">导出 CSV</button>
         <slot name="handle" />
       </div>
     </header>
-    <table class="tbl">
+    <table class="tbl cat-tbl">
       <thead>
         <tr>
-          <th style="cursor:pointer;text-align:left" @click="sortBy('name')">类目 <span style="margin-left:6px;color:var(--ink-5);font-family:var(--font-mono)">{{ arrow("name") }}</span></th>
-          <th style="cursor:pointer" @click="sortBy('sales')">销售额 <span style="margin-left:6px;color:var(--ink-5);font-family:var(--font-mono)">{{ arrow("sales") }}</span></th>
-          <th style="cursor:pointer" @click="sortBy('profit')">利润额 <span style="margin-left:6px;color:var(--ink-5);font-family:var(--font-mono)">{{ arrow("profit") }}</span></th>
-          <th style="cursor:pointer" @click="sortBy('gross_margin')">毛利率 <span style="margin-left:6px;color:var(--ink-5);font-family:var(--font-mono)">{{ arrow("gross_margin") }}</span></th>
-          <th style="cursor:pointer" @click="sortBy('refund_rate')">退款率 <span style="margin-left:6px;color:var(--ink-5);font-family:var(--font-mono)">{{ arrow("refund_rate") }}</span></th>
+          <th style="cursor:pointer;text-align:left" @click="sortBy('name')">
+            类目 <span class="sort-mark">{{ arrow("name") }}</span>
+          </th>
+          <th style="cursor:pointer" @click="sortBy('sales')">
+            销售额 <span class="sort-mark">{{ arrow("sales") }}</span>
+          </th>
+          <th>销售额环比</th>
+          <th style="cursor:pointer" @click="sortBy('profit')">
+            利润额 <span class="sort-mark">{{ arrow("profit") }}</span>
+          </th>
+          <th>利润额环比</th>
+          <th style="cursor:pointer" @click="sortBy('company_profit_rate')">
+            公司利润率 <span class="sort-mark">{{ arrow("company_profit_rate") }}</span>
+          </th>
+          <th style="cursor:pointer" @click="sortBy('gross_margin')">
+            毛利率 <span class="sort-mark">{{ arrow("gross_margin") }}</span>
+          </th>
+          <th style="cursor:pointer" @click="sortBy('refund_rate')">
+            发货退款率 <span class="sort-mark">{{ arrow("refund_rate") }}</span>
+          </th>
+          <th style="cursor:pointer" @click="sortBy('ship_pct')">
+            快递费率 <span class="sort-mark">{{ arrow("ship_pct") }}</span>
+          </th>
         </tr>
       </thead>
       <tbody>
@@ -58,12 +83,25 @@ function arrow(key) {
             {{ formatValue(r.sales, "currency") }}
             <span class="t-bar"><i :style="{ width: ((r.sales / maxSales) * 100) + '%' }" /></span>
           </td>
+          <td :class="delta(r.sales_delta_pct).cls" :title="`对比上期 ${formatValue(r.sales_prev || 0, 'currency')}`">
+            {{ delta(r.sales_delta_pct).text }}
+          </td>
           <td :class="r.profit >= 0 ? 't-pos' : 't-neg'">{{ formatValue(r.profit, "currency") }}</td>
+          <td :class="delta(r.profit_delta_pct).cls" :title="`对比上期 ${formatValue(r.profit_prev || 0, 'currency')}`">
+            {{ delta(r.profit_delta_pct).text }}
+          </td>
+          <td :class="r.company_profit_rate < 0 ? 't-neg' : ''">{{ formatValue(r.company_profit_rate, "percent") }}</td>
           <td>{{ formatValue(r.gross_margin, "percent") }}</td>
           <td :class="r.refund_rate >= 40 ? 't-neg' : ''">{{ formatValue(r.refund_rate, "percent") }}</td>
+          <td>{{ formatValue(r.ship_pct, "percent") }}</td>
         </tr>
-        <tr v-if="!sorted.length"><td colspan="5" class="empty-state">暂无数据，请先在「导入」页面上传 Excel</td></tr>
+        <tr v-if="!sorted.length"><td colspan="9" class="empty-state">暂无数据，请先在「导入」页面上传 Excel</td></tr>
       </tbody>
     </table>
   </section>
 </template>
+
+<style scoped>
+.cat-tbl th, .cat-tbl td { white-space: nowrap; }
+.sort-mark { margin-left: 6px; color: var(--ink-5); font-family: var(--font-mono); }
+</style>

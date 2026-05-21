@@ -18,6 +18,10 @@ ROLE_TENANT_USER = "tenant_user"
 TENANT_STATUS_ACTIVE = "active"
 TENANT_STATUS_DISABLED = "disabled"
 
+# Default "company fixed profit rate" — subtracted from 经营利润率 to derive
+# 公司利润率. Stored per-tenant so each company can tune their own number.
+DEFAULT_FIXED_PROFIT_RATE = Decimal("0.13")
+
 
 class Tenant(Base):
     """A customer company. Every business row is scoped by tenant_id."""
@@ -27,6 +31,12 @@ class Tenant(Base):
     code: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default=TENANT_STATUS_ACTIVE)
+    # 0.13 == 13 percentage points subtracted from 经营利润率 to compute
+    # 公司利润率. Range guarded at the API layer (0–1).
+    fixed_profit_rate: Mapped[Decimal] = mapped_column(
+        Numeric(6, 4), nullable=False, default=DEFAULT_FIXED_PROFIT_RATE,
+        server_default="0.13",
+    )
     created_by: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { listUsers, createUser, updateUser, deleteUser } from "../api/users";
+import { getTenantConfig, updateTenantConfig } from "../api/dashboard";
 import { useUserStore } from "../stores/user";
 import { useUiStore } from "../stores/ui";
 
@@ -12,6 +13,39 @@ const router = useRouter();
 
 const users = ref([]);
 const loading = ref(false);
+
+// 固定利润率配置（tenant_admin 可编辑、platform_admin 跨租户时不显示）
+const cfg = ref({ fixed_profit_rate: 0.13 });
+const cfgInput = ref("13");          // 显示成百分比（13 表示 13%）
+const cfgSaving = ref(false);
+const showCfg = computed(() => !userStore.isPlatformAdmin && userStore.user?.role === "tenant_admin");
+
+async function loadCfg() {
+  if (!showCfg.value) return;
+  try {
+    const data = await getTenantConfig();
+    cfg.value = data;
+    cfgInput.value = (Number(data.fixed_profit_rate) * 100).toFixed(2).replace(/\.?0+$/, "");
+  } catch (e) { /* ignore */ }
+}
+
+async function saveCfg() {
+  const pct = Number(cfgInput.value);
+  if (!Number.isFinite(pct) || pct < 0 || pct >= 100) {
+    ui.showToast("请输入 0-100 之间的数字", "error");
+    return;
+  }
+  cfgSaving.value = true;
+  try {
+    const data = await updateTenantConfig({ fixed_profit_rate: pct / 100 });
+    cfg.value = data;
+    ui.showToast("已保存，看板将按新比例计算公司利润率", "success");
+  } catch (e) {
+    ui.showToast(e.message || "保存失败", "error");
+  } finally {
+    cfgSaving.value = false;
+  }
+}
 
 // When platform_admin lands here from "/admin/tenants → 用户" they bring
 // tenant_id/tenant_code/tenant_name in the query string. Otherwise it's the
@@ -121,11 +155,34 @@ function backToTenants() {
   router.push({ name: "tenants" });
 }
 
-onMounted(refresh);
+onMounted(async () => { await refresh(); await loadCfg(); });
 watch(() => route.query.tenant_id, refresh);
 </script>
 
 <template>
+  <section v-if="showCfg" class="panel" style="margin-bottom:16px">
+    <header class="panel-head">
+      <span class="panel-title">企业配置</span>
+      <span class="panel-subtitle">仅企业管理员可见 · 影响看板的「公司利润率」计算</span>
+    </header>
+    <div style="padding:18px 22px">
+      <div class="cfg-row">
+        <label>
+          固定利润率
+          <span class="t-muted" style="font-size:12px;margin-left:6px">公司利润率 = 经营利润率 − 此值</span>
+        </label>
+        <div class="cfg-input">
+          <input type="number" min="0" max="99.99" step="0.01" v-model="cfgInput" :disabled="cfgSaving" />
+          <span class="suffix">%</span>
+          <button class="btn primary sm" @click="saveCfg" :disabled="cfgSaving">{{ cfgSaving ? "保存中…" : "保存" }}</button>
+        </div>
+      </div>
+      <div class="t-muted" style="font-size:12px;margin-top:8px">
+        当前生效值：{{ (cfg.fixed_profit_rate * 100).toFixed(2).replace(/\.?0+$/, "") }}%。看板「公司利润率」卡片上的开关只控制当前用户是否减去此值，不影响这里保存的配置。
+      </div>
+    </div>
+  </section>
+
   <section class="panel">
     <header class="panel-head">
       <span class="panel-title">用户管理</span>
@@ -230,4 +287,16 @@ watch(() => route.query.tenant_id, refresh);
 .modal-foot { border-bottom: 0; border-top: 1px solid var(--divider); justify-content: flex-end; }
 .modal-body { padding: 18px; }
 .error { font-size: 12px; color: var(--neg); min-height: 16px; }
+
+.cfg-row { display: flex; flex-direction: column; gap: 8px; }
+.cfg-row > label { font-size: 13px; color: var(--ink-2); font-weight: 500; }
+.cfg-input { display: flex; align-items: center; gap: 6px; }
+.cfg-input input {
+  width: 100px; padding: 8px 10px;
+  border: 1px solid var(--border); border-radius: 8px;
+  font-family: var(--font-mono); font-size: 14px; color: var(--ink);
+  background: var(--surface);
+}
+.cfg-input input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-line); }
+.cfg-input .suffix { color: var(--ink-4); font-family: var(--font-mono); font-size: 13px; }
 </style>
