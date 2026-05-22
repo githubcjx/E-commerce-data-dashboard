@@ -113,14 +113,31 @@ async function refreshHistory() {
   try { history.value = await listBatches(20); } catch (_) {}
 }
 
-async function rollback(id) {
-  if (!confirm("确定回滚此批次？将删除该批次所有写入数据。")) return;
+async function rollback(batch) {
+  // Accept either the batch object (preferred) or a bare id (legacy
+  // callers). Resolving the filename up-front so the success toast can
+  // identify which batch was rolled back — useful when there are many
+  // entries in the history list.
+  const id = typeof batch === "string" ? batch : batch?.id;
+  const filename = typeof batch === "object" ? batch?.filename : null;
+  if (!id) return;
+  const label = filename ? `「${filename}」` : "此批次";
+  if (!confirm(`确定回滚${label}？将删除该批次所有写入数据，且不可恢复。`)) return;
   try {
     const r = await rollbackBatch(id);
-    ui.showToast(`已回滚 · 删除 ${r.deleted} 行`, "success");
+    // Defensive: server returns { deleted: N } but guard against unexpected shapes.
+    const n = (r && typeof r.deleted === "number") ? r.deleted : 0;
+    // Long-form, longer-lived toast so the user can clearly see the count.
+    ui.showToast(
+      filename
+        ? `已回滚「${filename}」· 共删除 ${n.toLocaleString("zh-CN")} 行数据`
+        : `已回滚 · 共删除 ${n.toLocaleString("zh-CN")} 行数据`,
+      "success",
+      4500,
+    );
     refreshHistory();
   } catch (err) {
-    ui.showToast("回滚失败：" + err.message, "error");
+    ui.showToast("回滚失败：" + err.message, "error", 4500);
   }
 }
 
@@ -219,7 +236,7 @@ onMounted(refreshHistory);
             · 总 {{ h.total_rows }}
           </span>
           <span class="file-meta" style="width:160px;text-align:right">{{ new Date(h.created_at).toLocaleString("zh-CN", { hour12: false }) }}</span>
-          <button class="btn ghost sm" @click="rollback(h.id)" :disabled="h.status === 'processing' || isBusy">回滚</button>
+          <button class="btn ghost sm" @click="rollback(h)" :disabled="h.status === 'processing' || isBusy">回滚</button>
         </li>
         <li v-if="!history.length" class="empty-state" style="display:block">暂无导入记录</li>
       </ul>
