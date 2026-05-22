@@ -57,7 +57,22 @@ function stopBubble(e) { e.stopPropagation(); }
     <div>
       <div class="metric-head">
         <span class="metric-label">{{ item.label }}</span>
-        <span v-if="isCompanyRate" class="rate-toggle" @mousedown.stop @click="onToggle" :title="store.subtractFixed ? `已减去 ${(store.fixedProfitRate * 100).toFixed(0)}%` : '当前等同 经营利润率'">
+        <!-- hasFixedRate=false → user has no department in scope, so there's
+             nothing to subtract. Show a hint chip instead of the live toggle. -->
+        <span
+          v-if="isCompanyRate && !store.hasFixedRate"
+          class="rate-toggle no-rate"
+          @mousedown.stop @click.stop
+          title="未选择部门视角，公司利润率 = 经营利润率"
+        >
+          <span class="rate-toggle-text">未设置部门</span>
+        </span>
+        <span
+          v-else-if="isCompanyRate"
+          class="rate-toggle"
+          @mousedown.stop @click="onToggle"
+          :title="store.subtractFixed ? `已减去 ${(store.fixedProfitRate * 100).toFixed(0)}%` : '当前等同 经营利润率'"
+        >
           <span class="rate-toggle-track" :class="{ on: store.subtractFixed }">
             <span class="rate-toggle-thumb" />
           </span>

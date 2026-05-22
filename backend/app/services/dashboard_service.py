@@ -26,13 +26,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, timedelta
-from decimal import Decimal
 
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import (
-    ROLE_PLATFORM_ADMIN, ROLE_TENANT_SUPER_ADMIN, SalesRecord, Tenant, User,
+    Department, ROLE_PLATFORM_ADMIN, ROLE_TENANT_SUPER_ADMIN, SalesRecord, User,
 )
 
 
@@ -274,12 +273,36 @@ def _delta_pct(curr: float, prev: float) -> float | None:
     return (curr - prev) / abs(prev) * 100
 
 
-async def _tenant_fixed_rate(session: AsyncSession, tenant_id: int) -> float:
-    """Read this tenant's 公司利润率 base; default 0.13 if not set."""
+async def resolve_fixed_rate(
+    session: AsyncSession, user: User, view_department_id: int | None = None,
+) -> tuple[float, bool]:
+    """Pick the 固定利润率 to apply for the logged-in user.
+
+    Returns (rate, has_rate). When has_rate is False, callers should still
+    proceed with rate=0 so 公司利润率 mirrors 经营利润率 instead of
+    silently zeroing out — but the API response will flag this so the
+    frontend can show '—' or a prompt.
+
+    Resolution order:
+      1. view_department_id (super-admin's "以部门视角查看" picker).
+      2. user.department_id (the user's own department).
+      3. None → has_rate=False.
+    """
+    dept_id = view_department_id if view_department_id is not None else user.department_id
+    if dept_id is None:
+        return 0.0, False
     row = (await session.execute(
-        select(Tenant.fixed_profit_rate).where(Tenant.id == tenant_id)
-    )).scalar_one_or_none()
-    return float(row) if row is not None else 0.13
+        select(Department.fixed_profit_rate, Department.tenant_id)
+        .where(Department.id == dept_id)
+    )).first()
+    if row is None:
+        return 0.0, False
+    rate, dept_tenant = row
+    # Cross-tenant safety: a tenant_super_admin's view picker is only allowed
+    # to point at departments of their own tenant. Treat mismatch as no-rate.
+    if user.role != ROLE_PLATFORM_ADMIN and user.tenant_id is not None and dept_tenant != user.tenant_id:
+        return 0.0, False
+    return float(rate or 0), True
 
 
 # ---------------------------------------------------------------------------
@@ -289,23 +312,28 @@ async def _tenant_fixed_rate(session: AsyncSession, tenant_id: int) -> float:
 async def get_kpis(
     session, tenant_id, start_date, end_date, granularity, shop_code, owner, category,
     subtract_fixed: bool = True, scope_owners: list[str] | None = None,
+    fixed_profit_rate: float = 0.0, has_fixed_rate: bool = True,
 ):
     start_date, end_date = normalize_range(start_date, end_date)
     prev_start, prev_end = previous_range(start_date, end_date)
-    fixed = await _tenant_fixed_rate(session, tenant_id)
+    # If no rate is in scope (super-admin with no view-as picker, or user
+    # without a department), force subtract_fixed off so 公司利润率 mirrors
+    # 经营利润率 instead of silently subtracting 0.
+    effective_subtract = subtract_fixed and has_fixed_rate
+    fixed = fixed_profit_rate
 
     # One query covers prev + current span; series buckets are inside current.
     daily = await _daily_aggregates(
         session, tenant_id, prev_start, end_date, shop_code, owner, category, scope_owners
     )
 
-    curr_kpi = _kpis_from_sums(_sum_range(daily, start_date, end_date), fixed, subtract_fixed)
-    prev_kpi = _kpis_from_sums(_sum_range(daily, prev_start, prev_end), fixed, subtract_fixed)
+    curr_kpi = _kpis_from_sums(_sum_range(daily, start_date, end_date), fixed, effective_subtract)
+    prev_kpi = _kpis_from_sums(_sum_range(daily, prev_start, prev_end), fixed, effective_subtract)
 
     buckets = _enumerate_buckets(start_date, end_date, granularity)
     series_by_metric: dict[str, list[float]] = {m.key: [] for m in METRIC_DEFS}
     for b_start, b_end, _label in buckets:
-        bucket_kpi = _kpis_from_sums(_sum_range(daily, b_start, b_end), fixed, subtract_fixed)
+        bucket_kpi = _kpis_from_sums(_sum_range(daily, b_start, b_end), fixed, effective_subtract)
         for m in METRIC_DEFS:
             series_by_metric[m.key].append(bucket_kpi[m.key])
 
@@ -329,7 +357,8 @@ async def get_kpis(
         "current_label": _label_range(start_date, end_date),
         "previous_label": _label_range(prev_start, prev_end),
         "fixed_profit_rate": fixed,
-        "subtract_fixed": subtract_fixed,
+        "has_fixed_rate": has_fixed_rate,
+        "subtract_fixed": effective_subtract,
     }
 
 
@@ -337,11 +366,13 @@ async def get_trend(
     session, tenant_id, start_date, end_date, granularity, metric,
     shop_code, owner, category, subtract_fixed: bool = True,
     scope_owners: list[str] | None = None,
+    fixed_profit_rate: float = 0.0, has_fixed_rate: bool = True,
 ):
     if metric not in {m.key for m in METRIC_DEFS}:
         metric = "sales"
     start_date, end_date = normalize_range(start_date, end_date)
-    fixed = await _tenant_fixed_rate(session, tenant_id)
+    effective_subtract = subtract_fixed and has_fixed_rate
+    fixed = fixed_profit_rate
 
     daily = await _daily_aggregates(
         session, tenant_id, start_date, end_date, shop_code, owner, category, scope_owners
@@ -350,7 +381,7 @@ async def get_trend(
     buckets = _enumerate_buckets(start_date, end_date, granularity)
     points = []
     for b_start, b_end, label in buckets:
-        bucket_kpi = _kpis_from_sums(_sum_range(daily, b_start, b_end), fixed, subtract_fixed)
+        bucket_kpi = _kpis_from_sums(_sum_range(daily, b_start, b_end), fixed, effective_subtract)
         points.append({"date": label, "value": bucket_kpi[metric]})
     return {"metric": metric, "points": points, "granularity": granularity}
 
@@ -358,6 +389,7 @@ async def get_trend(
 async def get_category_breakdown(
     session, tenant_id, start_date, end_date, shop_code, owner,
     subtract_fixed: bool = True, scope_owners: list[str] | None = None,
+    fixed_profit_rate: float = 0.0, has_fixed_rate: bool = True,
 ):
     """Per-category aggregate with prev-period 环比 on sales + profit.
 
@@ -365,7 +397,8 @@ async def get_category_breakdown(
     """
     start_date, end_date = normalize_range(start_date, end_date)
     prev_start, prev_end = previous_range(start_date, end_date)
-    fixed = await _tenant_fixed_rate(session, tenant_id)
+    effective_subtract = subtract_fixed and has_fixed_rate
+    fixed = fixed_profit_rate
 
     def _select_for(start: date, end: date):
         cols = (
@@ -402,7 +435,7 @@ async def get_category_breakdown(
     for r in curr_rows:
         cat = r.category or "(未分类)"
         sums = to_sums(r)
-        kpi = _kpis_from_sums(sums, fixed, subtract_fixed)
+        kpi = _kpis_from_sums(sums, fixed, effective_subtract)
 
         # 环比 for sales + profit
         prev = prev_by_cat.get(r.category)

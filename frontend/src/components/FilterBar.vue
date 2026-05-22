@@ -1,9 +1,18 @@
 <script setup>
 import { computed } from "vue";
 import { useDashboardStore } from "../stores/dashboard";
+import { useUserStore } from "../stores/user";
 
 const store = useDashboardStore();
+const userStore = useUserStore();
 const emit = defineEmits(["reset"]);
+
+// Super-admin only — let them switch which department's 固定利润率 the
+// 公司利润率 metric uses. Plain users implicitly use their own department.
+const showDeptViewPicker = computed(() => userStore.isTenantSuperAdmin);
+async function onViewDept(v) {
+  await store.setViewDepartmentId(v === "" ? null : v);
+}
 
 // Top filter: which period the user is looking at. Drives the date picker
 // shape below + the default range when clicked.
@@ -180,6 +189,21 @@ async function onYearEnd(v) {
       <span class="filter-label">类目</span>
       <select class="select" :value="store.category" @change="onCat($event.target.value)">
         <option v-for="c in cats" :key="c" :value="c">{{ catLabel(c) }}</option>
+      </select>
+    </div>
+
+    <!-- Super-admin: pick which department's 固定利润率 to apply to 公司利润率 -->
+    <div v-if="showDeptViewPicker" class="filter-group">
+      <span class="filter-label" title="选择以哪个部门视角查看公司利润率（影响 固定利润率 的取值）">部门视角</span>
+      <select
+        class="select"
+        :value="store.viewDepartmentId == null ? '' : store.viewDepartmentId"
+        @change="onViewDept($event.target.value)"
+      >
+        <option value="">不指定（公司利润率 = 经营利润率）</option>
+        <option
+          v-for="d in store.departmentOptions" :key="d.id" :value="d.id"
+        >{{ d.name }} · {{ (Number(d.fixed_profit_rate) * 100).toFixed(2).replace(/\.?0+$/, "") }}%</option>
       </select>
     </div>
 

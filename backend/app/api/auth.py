@@ -3,12 +3,25 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
-from ..models import TENANT_STATUS_DISABLED, Tenant, User
+from ..models import Department, TENANT_STATUS_DISABLED, Tenant, User
 from ..rate_limit import check_login_allowed, record_login_failure, record_login_success
 from ..schemas import ApiResponse, LoginRequest, LoginResponse, TenantBrief, UserOut
 from ..security import create_token, get_current_user, verify_password
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+
+
+async def _user_out_with_department(db: AsyncSession, user: User) -> UserOut:
+    """UserOut hydrated with department_name + department_fixed_profit_rate."""
+    out = UserOut.model_validate(user)
+    if user.department_id is not None:
+        dept = (await db.execute(
+            select(Department).where(Department.id == user.department_id)
+        )).scalar_one_or_none()
+        if dept:
+            out.department_name = dept.name
+            out.department_fixed_profit_rate = float(dept.fixed_profit_rate)
+    return out
 
 
 @router.post("/login", response_model=ApiResponse[LoginResponse])
@@ -38,7 +51,7 @@ async def login(body: LoginRequest, request: Request, db: AsyncSession = Depends
     return ApiResponse(data=LoginResponse(
         token=token,
         expire_at=expire,
-        user=UserOut.model_validate(user),
+        user=await _user_out_with_department(db, user),
         tenant=tenant_brief,
     ))
 
@@ -55,6 +68,6 @@ async def me(user: User = Depends(get_current_user), db: AsyncSession = Depends(
     return ApiResponse(data=LoginResponse(
         token="",
         expire_at=datetime.now(timezone.utc),
-        user=UserOut.model_validate(user),
+        user=await _user_out_with_department(db, user),
         tenant=tenant_brief,
     ))

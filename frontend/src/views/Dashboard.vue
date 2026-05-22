@@ -49,7 +49,10 @@ function onReset() {
 }
 
 onMounted(async () => {
-  await Promise.all([store.loadFilters(), store.loadLayout(), store.loadTenantConfig()]);
+  // loadDepartments populates the 部门视角 picker (super-admin) and gives
+  // plain users a labels table for free. loadFilters / loadLayout are
+  // independent and run in parallel.
+  await Promise.all([store.loadFilters(), store.loadLayout(), store.loadDepartments()]);
   await store.loadAll();
 });
 

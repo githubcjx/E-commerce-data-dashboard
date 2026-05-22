@@ -29,25 +29,18 @@ class TenantBrief(BaseModel):
         from_attributes = True
 
 
-class TenantConfigOut(BaseModel):
-    """Per-tenant dashboard configuration the tenant_admin can tune."""
-    fixed_profit_rate: float = 0.13
-
-    class Config:
-        from_attributes = True
-
-
-class TenantConfigUpdate(BaseModel):
-    # Stored as NUMERIC(6, 4); 0 ≤ x < 1 covers any plausible business setting.
-    fixed_profit_rate: float = Field(..., ge=0, lt=1)
-
-
 class UserOut(BaseModel):
     id: int
     username: str
     role: str
     tenant_id: int | None = None
     display_name: str | None = None
+    department_id: int | None = None
+    department_name: str | None = None
+    # Per-user department fixed_profit_rate (denormalized into the user row
+    # for the dashboard to read on its own login — avoids an extra round trip).
+    # NULL for super_admin / platform_admin (no department).
+    department_fixed_profit_rate: float | None = None
     # NULL means "unrestricted" (super_admin & platform_admin behave that way
     # regardless of stored value). An empty list means "scoped to nothing".
     data_scope_owners: list[str] | None = None
@@ -100,6 +93,9 @@ class UserCreate(BaseModel):
     # is *not* assignable here — it's reserved for the initial tenant account.
     role: str = Field(default="tenant_user")
     display_name: str | None = Field(default=None, max_length=64)
+    # Department to drop the new user into. Required for non-super roles
+    # (validated at the API layer to keep the error message friendly).
+    department_id: int | None = None
     # NULL = unrestricted (default). List of owner names = scoped view.
     data_scope_owners: list[str] | None = None
     # Only honored when actor is platform_admin (used from /admin/users?tenant_id=).
@@ -110,9 +106,55 @@ class UserUpdate(BaseModel):
     password: str | None = Field(default=None, min_length=6, max_length=128)
     role: str | None = None
     display_name: str | None = Field(default=None, max_length=64)
+    # Transfer a user to a different department. Omit to leave unchanged.
+    department_id: int | None = None
     # Sent as a list to set scope, or as null to clear (= unrestricted).
     # Omit the key entirely to leave scope unchanged.
     data_scope_owners: list[str] | None = None
+
+
+# ---------- Departments ----------
+
+class DepartmentMember(BaseModel):
+    id: int
+    username: str
+    display_name: str | None = None
+    role: str
+
+    class Config:
+        from_attributes = True
+
+
+class DepartmentOut(BaseModel):
+    id: int
+    tenant_id: int
+    name: str
+    fixed_profit_rate: float
+    member_count: int = 0
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class DepartmentDetailOut(DepartmentOut):
+    members: list[DepartmentMember] = []
+
+
+class DepartmentCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    fixed_profit_rate: float = Field(..., ge=0, lt=1)
+    member_ids: list[int] = Field(default_factory=list)
+    # Honored only when actor is platform_admin (multi-tenant management).
+    tenant_id: int | None = None
+
+
+class DepartmentUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    fixed_profit_rate: float | None = Field(default=None, ge=0, lt=1)
+    # If present, replaces the member list wholesale (members not in the new
+    # list are unassigned; members newly in the list are assigned).
+    member_ids: list[int] | None = None
 
 
 # ---------- Import ----------

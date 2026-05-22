@@ -44,8 +44,30 @@ class Tenant(Base):
     code: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default=TENANT_STATUS_ACTIVE)
-    # 0.13 == 13 percentage points subtracted from 经营利润率 to compute
-    # 公司利润率. Range guarded at the API layer (0–1).
+    created_by: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class Department(Base):
+    """A team / 部门 inside a tenant. Each department sets its own
+    `fixed_profit_rate` — the percentage points subtracted from 经营利润率
+    to derive 公司利润率. KPI computation uses *the logged-in user's*
+    department rate, so the same record can show different 公司利润率
+    depending on who is looking at it.
+    """
+    __tablename__ = "departments"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "name", name="uq_dept_tenant_name"),
+        Index("ix_dept_tenant", "tenant_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    # Per-department 固定利润率. NOT NULL — every department must have one.
     fixed_profit_rate: Mapped[Decimal] = mapped_column(
         Numeric(6, 4), nullable=False, default=DEFAULT_FIXED_PROFIT_RATE,
         server_default="0.13",
@@ -69,6 +91,14 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[str] = mapped_column(String(32), nullable=False, default=ROLE_TENANT_USER)
     display_name: Mapped[str | None] = mapped_column(String(64))
+    # Department membership. NULL only for platform_admin and
+    # tenant_super_admin (they sit above the org-chart, not inside a dept).
+    # tenant_admin / tenant_user are required to belong to one — enforced at
+    # the API layer rather than via a NOT NULL constraint, because the
+    # super-admin row in the same table is also NULLable here.
+    department_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("departments.id", ondelete="SET NULL"), index=True
+    )
     # Per-user data scope. Set by the tenant_super_admin via the admin panel.
     #   NULL  → unrestricted (default; super_admin & platform_admin always
     #           behave as if NULL regardless of stored value).

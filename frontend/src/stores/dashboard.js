@@ -1,8 +1,9 @@
 import { defineStore } from "pinia";
 import {
   fetchKpi, fetchTrend, fetchCategory, fetchFilters,
-  getLayout, saveLayout, getTenantConfig,
+  getLayout, saveLayout,
 } from "../api/dashboard";
+import { listDepartments } from "../api/departments";
 
 // 8 metrics. companyProfitRate is new; refundRate keeps the same key but its
 // display label changes to 发货退款率 (label comes from the API).
@@ -89,14 +90,25 @@ export const useDashboardStore = defineStore("dashboard", {
     // Period labels surfaced into the UI (KPI cards say "对比 5.1~5.7")
     currentLabel: "",
     previousLabel: "",
-    fixedProfitRate: 0.13,        // server-fetched per tenant
+    // Currently-applied 固定利润率 — comes from the *logged-in user's*
+    // department (or, for super-admins, the department they picked in the
+    // "以部门视角查看" dropdown). hasFixedRate is false when no department
+    // is in scope; in that case 公司利润率 mirrors 经营利润率 and we show
+    // a hint in the UI.
+    fixedProfitRate: 0.13,
+    hasFixedRate: true,
+
+    // Super-admin "以部门视角查看" picker. Plain user → null (and uses their
+    // own department implicitly). List populated by loadDepartments().
+    viewDepartmentId: null,
+    departmentOptions: [],
 
     loading: false,
   }),
   getters: {
     // Shared range/filter params — granularity is added per-call by callers.
     _baseParams(state) {
-      return {
+      const p = {
         start_date: state.startDate,
         end_date: state.endDate,
         shop_code: state.shopCode,
@@ -104,19 +116,22 @@ export const useDashboardStore = defineStore("dashboard", {
         category: state.category,
         subtract_fixed: state.subtractFixed,
       };
+      if (state.viewDepartmentId != null) p.view_department_id = state.viewDepartmentId;
+      return p;
     },
   },
   actions: {
     async loadFilters() {
       try { this.filters = await fetchFilters(); } catch (_) { /* keep empty */ }
     },
-    async loadTenantConfig() {
+    async loadDepartments() {
+      // Super-admin's "以部门视角查看" picker needs the tenant's department
+      // list. Plain users don't see the picker — but loading is harmless and
+      // they may still want to know the labels in the future. Failure is
+      // non-fatal (e.g. tenant_user is forbidden by the backend).
       try {
-        const cfg = await getTenantConfig();
-        if (cfg && typeof cfg.fixed_profit_rate === "number") {
-          this.fixedProfitRate = cfg.fixed_profit_rate;
-        }
-      } catch (_) { /* not fatal */ }
+        this.departmentOptions = await listDepartments();
+      } catch (_) { this.departmentOptions = []; }
     },
     async loadKpi() {
       // Sparklines use their own auto-derived bucketing (range-length based)
@@ -128,6 +143,9 @@ export const useDashboardStore = defineStore("dashboard", {
       this.previousLabel = data.previous_label || "";
       if (typeof data.fixed_profit_rate === "number") {
         this.fixedProfitRate = data.fixed_profit_rate;
+      }
+      if (typeof data.has_fixed_rate === "boolean") {
+        this.hasFixedRate = data.has_fixed_rate;
       }
     },
     async loadTrend() {
@@ -215,6 +233,13 @@ export const useDashboardStore = defineStore("dashboard", {
     async setSubtractFixed(v) {
       this.subtractFixed = !!v;
       await Promise.all([this.persistLayout(), this.loadAll()]);
+    },
+    async setViewDepartmentId(id) {
+      // Super-admin only — switches which department's 固定利润率 is
+      // applied to the dashboard. null = "no view picked"; the backend will
+      // then report has_fixed_rate=false and 公司利润率 mirrors 经营利润率.
+      this.viewDepartmentId = id == null ? null : Number(id);
+      await this.loadAll();
     },
   },
 });

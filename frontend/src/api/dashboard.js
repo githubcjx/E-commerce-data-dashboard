@@ -7,7 +7,3 @@ export const fetchFilters = () => client.get("/api/dashboard/filters");
 
 export const getLayout = () => client.get("/api/layout");
 export const saveLayout = (layout_json) => client.put("/api/layout", { layout_json });
-
-// Tenant-scoped config used by the dashboard (公司利润率 base)
-export const getTenantConfig = () => client.get("/api/tenants/me/config");
-export const updateTenantConfig = (body) => client.put("/api/tenants/me/config", body);

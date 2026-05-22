@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
 
-from .api import auth, dashboard, import_api, layout, tenants, users
+from .api import auth, dashboard, departments, import_api, layout, tenants, users
 from .config import get_settings
 from .db import Base, SessionLocal, engine
 from .models import ROLE_PLATFORM_ADMIN, User
@@ -60,6 +60,7 @@ async def health() -> dict:
 app.include_router(auth.router)
 app.include_router(tenants.router)
 app.include_router(users.router)
+app.include_router(departments.router)
 app.include_router(import_api.router)
 app.include_router(dashboard.router)
 app.include_router(layout.router)
