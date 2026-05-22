@@ -1,5 +1,5 @@
 <script setup>
-import { computed } from "vue";
+import { computed, ref, onMounted, onBeforeUnmount } from "vue";
 import { useDashboardStore } from "../stores/dashboard";
 import { useUserStore } from "../stores/user";
 
@@ -14,6 +14,67 @@ async function onViewDept(v) {
   await store.setViewDepartmentId(v === "" ? null : v);
 }
 
+// ---------------------------------------------------------------------------
+// Multi-select pickers (负责人 / 店铺 / 类目)
+// ---------------------------------------------------------------------------
+// Build option lists. Shops use {code, name}; owners + categories are flat
+// strings. Empty store selection = 全部 (the filter is off).
+const shopOptions = computed(() =>
+  (store.filters.shops || []).map((s) => ({ value: s.code, label: s.name || s.code }))
+);
+const ownerOptions = computed(() =>
+  (store.filters.owners || []).map((n) => ({ value: n, label: n }))
+);
+const categoryOptions = computed(() =>
+  (store.filters.categories || []).map((c) => ({ value: c, label: c }))
+);
+
+// Label shown on the closed pill. "全部" when nothing selected, the single
+// label when one is selected, "{first} +N" otherwise.
+function pillLabel(selected, options) {
+  if (!selected.length) return "全部";
+  const lookup = new Map(options.map((o) => [o.value, o.label]));
+  const labels = selected.map((v) => lookup.get(v) || v);
+  if (labels.length === 1) return labels[0];
+  return `${labels[0]} +${labels.length - 1}`;
+}
+
+// Open-state tracking — only one popover open at a time.
+const openId = ref(null);
+function toggleOpen(id) { openId.value = openId.value === id ? null : id; }
+function closeAll() { openId.value = null; }
+
+// Close on outside click.
+function onDocClick(e) {
+  if (!e.target.closest(".ms-wrap")) closeAll();
+}
+onMounted(() => document.addEventListener("click", onDocClick));
+onBeforeUnmount(() => document.removeEventListener("click", onDocClick));
+
+// Generic toggle for a value in one of the selected arrays.
+function toggleValue(arr, value) {
+  const i = arr.indexOf(value);
+  if (i === -1) arr.push(value); else arr.splice(i, 1);
+}
+
+async function onOwnerToggle(value) {
+  toggleValue(store.owners, value);
+  await store.loadAll();
+}
+async function onShopToggle(value) {
+  toggleValue(store.shopCodes, value);
+  await store.loadAll();
+}
+async function onCategoryToggle(value) {
+  toggleValue(store.categories, value);
+  await store.loadAll();
+}
+async function onSelectAll(which) {
+  // "全部" = empty array (no filter). Snappier than checking every box.
+  store[which] = [];
+  await store.loadAll();
+}
+
 // Top filter: which period the user is looking at. Drives the date picker
 // shape below + the default range when clicked.
 const TOP_GRANS = [
@@ -23,21 +84,10 @@ const TOP_GRANS = [
   ["year",  "年"],
 ];
 
-const shops = computed(() => [{ code: "all", name: "全部" }, ...(store.filters.shops || [])]);
-const owners = computed(() => ["all", ...(store.filters.owners || [])]);
-const cats = computed(() => ["all", ...(store.filters.categories || [])]);
-
-function ownerLabel(v) { return v === "all" ? "全部" : v; }
-function catLabel(v) { return v === "all" ? "全部" : v; }
-
 async function onTab(g) {
   if (store.topGranularity === g) return;
   await store.setTopGranularity(g);
 }
-
-async function onShop(v) { store.shopCode = v; await store.loadAll(); }
-async function onOwner(v) { store.owner = v; await store.loadAll(); }
-async function onCat(v) { store.category = v; await store.loadAll(); }
 
 // ---------------------------------------------------------------------------
 // Date helpers (local time, ISO output)
@@ -173,23 +223,89 @@ async function onYearEnd(v) {
       >{{ l }}</button>
     </div>
 
-    <div class="filter-group">
-      <span class="filter-label">店铺</span>
-      <select class="select" :value="store.shopCode" @change="onShop($event.target.value)">
-        <option v-for="s in shops" :key="s.code" :value="s.code">{{ s.code === 'all' ? '全部' : s.name }}</option>
-      </select>
-    </div>
-    <div class="filter-group">
+    <!-- Order: 负责人 → 店铺 → 类目, all multi-select -->
+    <div class="filter-group ms-wrap">
       <span class="filter-label">负责人</span>
-      <select class="select" :value="store.owner" @change="onOwner($event.target.value)">
-        <option v-for="o in owners" :key="o" :value="o">{{ ownerLabel(o) }}</option>
-      </select>
+      <button
+        type="button"
+        :class="['select ms-trigger', { 'has-selection': store.owners.length }]"
+        @click.stop="toggleOpen('owner')"
+      >
+        <span>{{ pillLabel(store.owners, ownerOptions) }}</span>
+        <span class="ms-chev">▾</span>
+      </button>
+      <div v-if="openId === 'owner'" class="ms-pop" @click.stop>
+        <button type="button" class="ms-item all-row" @click="onSelectAll('owners')">
+          <span class="ms-check" :class="{ on: !store.owners.length }">✓</span>
+          全部
+        </button>
+        <div class="ms-divider" />
+        <button
+          v-for="o in ownerOptions" :key="o.value"
+          type="button" class="ms-item"
+          @click="onOwnerToggle(o.value)"
+        >
+          <span class="ms-check" :class="{ on: store.owners.includes(o.value) }">✓</span>
+          {{ o.label }}
+        </button>
+        <div v-if="!ownerOptions.length" class="ms-empty">暂无可选项</div>
+      </div>
     </div>
-    <div class="filter-group">
+
+    <div class="filter-group ms-wrap">
+      <span class="filter-label">店铺</span>
+      <button
+        type="button"
+        :class="['select ms-trigger', { 'has-selection': store.shopCodes.length }]"
+        @click.stop="toggleOpen('shop')"
+      >
+        <span>{{ pillLabel(store.shopCodes, shopOptions) }}</span>
+        <span class="ms-chev">▾</span>
+      </button>
+      <div v-if="openId === 'shop'" class="ms-pop" @click.stop>
+        <button type="button" class="ms-item all-row" @click="onSelectAll('shopCodes')">
+          <span class="ms-check" :class="{ on: !store.shopCodes.length }">✓</span>
+          全部
+        </button>
+        <div class="ms-divider" />
+        <button
+          v-for="s in shopOptions" :key="s.value"
+          type="button" class="ms-item"
+          @click="onShopToggle(s.value)"
+        >
+          <span class="ms-check" :class="{ on: store.shopCodes.includes(s.value) }">✓</span>
+          {{ s.label }}
+        </button>
+        <div v-if="!shopOptions.length" class="ms-empty">暂无可选项</div>
+      </div>
+    </div>
+
+    <div class="filter-group ms-wrap">
       <span class="filter-label">类目</span>
-      <select class="select" :value="store.category" @change="onCat($event.target.value)">
-        <option v-for="c in cats" :key="c" :value="c">{{ catLabel(c) }}</option>
-      </select>
+      <button
+        type="button"
+        :class="['select ms-trigger', { 'has-selection': store.categories.length }]"
+        @click.stop="toggleOpen('cat')"
+      >
+        <span>{{ pillLabel(store.categories, categoryOptions) }}</span>
+        <span class="ms-chev">▾</span>
+      </button>
+      <div v-if="openId === 'cat'" class="ms-pop" @click.stop>
+        <button type="button" class="ms-item all-row" @click="onSelectAll('categories')">
+          <span class="ms-check" :class="{ on: !store.categories.length }">✓</span>
+          全部
+        </button>
+        <div class="ms-divider" />
+        <button
+          v-for="c in categoryOptions" :key="c.value"
+          type="button" class="ms-item"
+          @click="onCategoryToggle(c.value)"
+        >
+          <span class="ms-check" :class="{ on: store.categories.includes(c.value) }">✓</span>
+          {{ c.label }}
+        </button>
+        <div v-if="!categoryOptions.length" class="ms-empty">暂无可选项</div>
+      </div>
     </div>
 
     <!-- Super-admin: pick which department's 固定利润率 to apply to 公司利润率 -->
@@ -267,4 +383,55 @@ async function onYearEnd(v) {
 .range-picker .week-input { width: 130px; }
 .range-picker .year-input { width: 64px; text-align: center; }
 .range-sep { color: var(--ink-5); font-size: 12px; }
+
+/* Multi-select picker — looks like the native select on the closed state,
+   opens a chip checkbox list on click. Closes on outside click or via the
+   trigger toggle. Selection-on-pill: "全部" when empty, "A" when one,
+   "A +N" when many. */
+.ms-wrap { position: relative; }
+.ms-trigger {
+  display: inline-flex; align-items: center; justify-content: space-between;
+  gap: 6px; cursor: pointer; min-width: 110px; max-width: 220px;
+  text-align: left;
+}
+.ms-trigger > span:first-child {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ms-trigger.has-selection {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+}
+.ms-chev { font-size: 10px; color: var(--ink-4); flex-shrink: 0; }
+.ms-pop {
+  position: absolute; left: 0; top: calc(100% + 4px); z-index: 50;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; box-shadow: var(--shadow-pop);
+  min-width: 180px; max-width: 280px; max-height: 280px;
+  overflow-y: auto; padding: 4px;
+}
+.ms-item {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; padding: 7px 10px; border-radius: 6px;
+  appearance: none; border: 0; background: transparent;
+  font: inherit; font-size: 13px; color: var(--ink);
+  text-align: left; cursor: pointer;
+}
+.ms-item:hover { background: var(--surface-hover); }
+.ms-item.all-row { font-weight: 500; }
+.ms-check {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px; border: 1px solid var(--border);
+  border-radius: 4px; font-size: 11px; color: transparent;
+  background: var(--surface); flex-shrink: 0;
+  transition: background .15s, border-color .15s, color .15s;
+}
+.ms-check.on {
+  background: var(--accent); border-color: var(--accent);
+  color: #fff;
+}
+.ms-divider { height: 1px; background: var(--divider); margin: 4px 2px; }
+.ms-empty {
+  padding: 12px 10px; font-size: 12px; color: var(--ink-4); text-align: center;
+}
 </style>

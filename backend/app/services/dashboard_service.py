@@ -166,29 +166,48 @@ def _enumerate_buckets(start: date, end: date, granularity: str) -> list[tuple[d
 
 def _apply_filters(
     stmt, tenant_id: int,
-    shop_code: str | None, owner: str | None, category: str | None,
+    shop_codes: list[str] | None, owners: list[str] | None,
+    categories: list[str] | None,
     scope_owners: list[str] | None = None,
 ):
     """Common WHERE clauses for every dashboard query.
 
-    scope_owners enforces per-user data isolation:
+    The three picker filters are now lists (multi-select). Conventions:
+      None  → no filter (the picker is in "全部" mode, all values match)
+      []    → same as None (caller may pass either)
+      [..]  → SalesRecord.col IN (this list)
+
+    scope_owners enforces per-user data isolation on top:
       None → no extra restriction (super_admin / platform_admin)
       []   → match nothing (user explicitly scoped to no owners)
       [..] → SalesRecord.owner IN (this list)
-    Caller MUST intersect with the UI's owner picker (if the user picked one
-    specific owner from the dropdown).
+
+    When BOTH the user picked specific owners AND scope_owners is set, the
+    effective filter is the intersection — only owners in both lists match.
     """
     stmt = stmt.where(SalesRecord.tenant_id == tenant_id)
-    if shop_code and shop_code != "all":
-        stmt = stmt.where(SalesRecord.shop_code == shop_code)
-    if owner and owner != "all":
-        stmt = stmt.where(SalesRecord.owner == owner)
-    if category and category != "all":
-        stmt = stmt.where(SalesRecord.category == category)
-    if scope_owners is not None:
-        if not scope_owners:
-            # Force-empty result for a user scoped to nothing.
-            stmt = stmt.where(SalesRecord.id == -1)
+    if shop_codes:
+        stmt = stmt.where(SalesRecord.shop_code.in_(shop_codes))
+    if categories:
+        stmt = stmt.where(SalesRecord.category.in_(categories))
+
+    # Owners interact with scope_owners — intersect when both are constrained.
+    if scope_owners is None:
+        # No data-scope restriction → just apply the picker (if any).
+        if owners:
+            stmt = stmt.where(SalesRecord.owner.in_(owners))
+    elif not scope_owners:
+        # User is scoped to nothing — return empty regardless of picker.
+        stmt = stmt.where(SalesRecord.id == -1)
+    else:
+        # Both lists constrain: take the intersection. If the picker picked
+        # owners that aren't in scope, the result is empty.
+        if owners:
+            inter = [o for o in owners if o in set(scope_owners)]
+            if not inter:
+                stmt = stmt.where(SalesRecord.id == -1)
+            else:
+                stmt = stmt.where(SalesRecord.owner.in_(inter))
         else:
             stmt = stmt.where(SalesRecord.owner.in_(scope_owners))
     return stmt
@@ -199,9 +218,9 @@ async def _daily_aggregates(
     tenant_id: int,
     start: date,
     end: date,
-    shop_code: str | None,
-    owner: str | None,
-    category: str | None,
+    shop_codes: list[str] | None,
+    owners: list[str] | None,
+    categories: list[str] | None,
     scope_owners: list[str] | None = None,
 ) -> dict[date, dict[str, float]]:
     """One query: GROUP BY date over [start, end], return {date: {col: float}}."""
@@ -218,7 +237,7 @@ async def _daily_aggregates(
         func.coalesce(func.sum(SalesRecord.marketing_cost), 0).label("marketing_cost"),
     )
     stmt = select(*cols).where(and_(SalesRecord.date >= start, SalesRecord.date <= end))
-    stmt = _apply_filters(stmt, tenant_id, shop_code, owner, category, scope_owners).group_by(SalesRecord.date)
+    stmt = _apply_filters(stmt, tenant_id, shop_codes, owners, categories, scope_owners).group_by(SalesRecord.date)
     rows = (await session.execute(stmt)).all()
     return {
         r.date: {col: float(getattr(r, col) or 0) for col in _AGG_COLS}
@@ -310,7 +329,8 @@ async def resolve_fixed_rate(
 # ---------------------------------------------------------------------------
 
 async def get_kpis(
-    session, tenant_id, start_date, end_date, granularity, shop_code, owner, category,
+    session, tenant_id, start_date, end_date, granularity,
+    shop_codes, owners, categories,
     subtract_fixed: bool = True, scope_owners: list[str] | None = None,
     fixed_profit_rate: float = 0.0, has_fixed_rate: bool = True,
 ):
@@ -324,7 +344,7 @@ async def get_kpis(
 
     # One query covers prev + current span; series buckets are inside current.
     daily = await _daily_aggregates(
-        session, tenant_id, prev_start, end_date, shop_code, owner, category, scope_owners
+        session, tenant_id, prev_start, end_date, shop_codes, owners, categories, scope_owners
     )
 
     curr_kpi = _kpis_from_sums(_sum_range(daily, start_date, end_date), fixed, effective_subtract)
@@ -364,7 +384,7 @@ async def get_kpis(
 
 async def get_trend(
     session, tenant_id, start_date, end_date, granularity, metric,
-    shop_code, owner, category, subtract_fixed: bool = True,
+    shop_codes, owners, categories, subtract_fixed: bool = True,
     scope_owners: list[str] | None = None,
     fixed_profit_rate: float = 0.0, has_fixed_rate: bool = True,
 ):
@@ -375,7 +395,7 @@ async def get_trend(
     fixed = fixed_profit_rate
 
     daily = await _daily_aggregates(
-        session, tenant_id, start_date, end_date, shop_code, owner, category, scope_owners
+        session, tenant_id, start_date, end_date, shop_codes, owners, categories, scope_owners
     )
 
     buckets = _enumerate_buckets(start_date, end_date, granularity)
@@ -387,13 +407,17 @@ async def get_trend(
 
 
 async def get_category_breakdown(
-    session, tenant_id, start_date, end_date, shop_code, owner,
+    session, tenant_id, start_date, end_date,
+    shop_codes, owners, categories,
     subtract_fixed: bool = True, scope_owners: list[str] | None = None,
     fixed_profit_rate: float = 0.0, has_fixed_rate: bool = True,
 ):
     """Per-category aggregate with prev-period 环比 on sales + profit.
 
     Two queries (current + previous), then merge in Python by category name.
+
+    `categories` is honored here too: if the user picks specific categories,
+    only those show up in the breakdown (with their own current+prev values).
     """
     start_date, end_date = normalize_range(start_date, end_date)
     prev_start, prev_end = previous_range(start_date, end_date)
@@ -411,7 +435,7 @@ async def get_category_breakdown(
             func.coalesce(func.sum(SalesRecord.shipping_cost), 0).label("shipping_cost"),
         )
         stmt = select(*cols).where(and_(SalesRecord.date >= start, SalesRecord.date <= end)).group_by(SalesRecord.category)
-        return _apply_filters(stmt, tenant_id, shop_code, owner, None, scope_owners)
+        return _apply_filters(stmt, tenant_id, shop_codes, owners, categories, scope_owners)
 
     curr_rows = (await session.execute(_select_for(start_date, end_date))).all()
     prev_rows = (await session.execute(_select_for(prev_start, prev_end))).all()

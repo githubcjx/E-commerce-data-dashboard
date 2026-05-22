@@ -72,9 +72,11 @@ export const useDashboardStore = defineStore("dashboard", {
     topGranularity: "day",       // day | week | month | year
     startDate: todayStr(),
     endDate: todayStr(),
-    shopCode: "all",
-    owner: "all",
-    category: "all",
+    // Multi-select pickers. Empty array = 全部 (no filter); array of values
+    // = WHERE col IN (...) on the backend.
+    shopCodes: [],
+    owners: [],
+    categories: [],
     subtractFixed: true,          // 公司利润率 是否减去固定利润率
 
     activeMetric: "sales",
@@ -107,13 +109,16 @@ export const useDashboardStore = defineStore("dashboard", {
   }),
   getters: {
     // Shared range/filter params — granularity is added per-call by callers.
+    // Multi-select arrays are serialized as comma-separated strings; the
+    // backend treats an empty / "all" value as "no filter".
     _baseParams(state) {
+      const csv = (arr) => (arr && arr.length ? arr.join(",") : "all");
       const p = {
         start_date: state.startDate,
         end_date: state.endDate,
-        shop_code: state.shopCode,
-        owner: state.owner,
-        category: state.category,
+        shop_code: csv(state.shopCodes),
+        owner: csv(state.owners),
+        category: csv(state.categories),
         subtract_fixed: state.subtractFixed,
       };
       if (state.viewDepartmentId != null) p.view_department_id = state.viewDepartmentId;
@@ -160,8 +165,15 @@ export const useDashboardStore = defineStore("dashboard", {
       this.trendGranularityServed = data.granularity || this.topGranularity;
     },
     async loadCategory() {
-      const { start_date, end_date, shop_code, owner, subtract_fixed } = this._baseParams;
-      this.categoryRows = await fetchCategory({ start_date, end_date, shop_code, owner, subtract_fixed });
+      // Category endpoint also honors the category picker — passing all
+      // three lets the user narrow to a subset of categories if they want.
+      const {
+        start_date, end_date, shop_code, owner, category, subtract_fixed,
+        view_department_id,
+      } = this._baseParams;
+      const params = { start_date, end_date, shop_code, owner, category, subtract_fixed };
+      if (view_department_id != null) params.view_department_id = view_department_id;
+      this.categoryRows = await fetchCategory(params);
     },
     async loadAll() {
       this.loading = true;

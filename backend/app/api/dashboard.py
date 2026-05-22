@@ -18,13 +18,28 @@ def _tenant_for(user: User) -> int:
     return user.tenant_id
 
 
+def _parse_csv(value: str | None) -> list[str] | None:
+    """Parse the picker's comma-separated value into a list, or None for
+    "全部" / empty. The sentinel "all" (legacy) is treated as None too.
+    """
+    if value is None:
+        return None
+    v = value.strip()
+    if not v or v == "all":
+        return None
+    items = [s.strip() for s in v.split(",") if s.strip()]
+    if not items or "all" in items:
+        return None
+    return items
+
+
 def _common(
     start_date: date = Query(..., description="范围起"),
     end_date: date = Query(..., description="范围止"),
     granularity: str = Query("day", regex="^(day|week|month|year)$"),
-    shop_code: str = Query("all"),
-    owner: str = Query("all"),
-    category: str = Query("all"),
+    shop_code: str = Query("all", description="店铺 code，多个以逗号分隔；'all' 表示全部"),
+    owner: str = Query("all", description="负责人，多个以逗号分隔；'all' 表示全部"),
+    category: str = Query("all", description="类目，多个以逗号分隔；'all' 表示全部"),
     subtract_fixed: bool = Query(True, description="公司利润率是否减去固定利润率"),
     view_department_id: int | None = Query(
         None,
@@ -35,9 +50,9 @@ def _common(
         "start_date": start_date,
         "end_date": end_date,
         "granularity": granularity,
-        "shop_code": shop_code,
-        "owner": owner,
-        "category": category,
+        "shop_codes": _parse_csv(shop_code),
+        "owners": _parse_csv(owner),
+        "categories": _parse_csv(category),
         "subtract_fixed": subtract_fixed,
         "view_department_id": view_department_id,
     }
@@ -86,6 +101,7 @@ async def category(
     end_date: date = Query(...),
     shop_code: str = Query("all"),
     owner: str = Query("all"),
+    category: str = Query("all"),
     subtract_fixed: bool = Query(True),
     view_department_id: int | None = Query(None),
     user: User = Depends(get_current_user),
@@ -94,7 +110,8 @@ async def category(
     tid = _tenant_for(user)
     rate, has_rate = await svc.resolve_fixed_rate(db, user, view_department_id)
     data = await svc.get_category_breakdown(
-        db, tid, start_date, end_date, shop_code, owner,
+        db, tid, start_date, end_date,
+        _parse_csv(shop_code), _parse_csv(owner), _parse_csv(category),
         subtract_fixed=subtract_fixed,
         scope_owners=svc.effective_scope_owners(user),
         fixed_profit_rate=rate, has_fixed_rate=has_rate,
