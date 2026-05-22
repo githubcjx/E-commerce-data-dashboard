@@ -4,6 +4,7 @@ import { formatValue, formatDelta } from "../utils/format";
 import Sparkline from "./Sparkline.vue";
 import GripIcon from "./GripIcon.vue";
 import { useDashboardStore } from "../stores/dashboard";
+import { useUserStore } from "../stores/user";
 
 const props = defineProps({
   item: { type: Object, required: true },
@@ -13,6 +14,19 @@ const props = defineProps({
 const emit = defineEmits(["click", "dragstart", "dragenter", "dragover", "dragleave", "drop", "dragend"]);
 
 const store = useDashboardStore();
+const userStore = useUserStore();
+
+// When hasFixedRate is false, the message we show depends on WHY:
+//   - super_admin (no own department by design) hasn't picked 部门视角
+//     in the filter bar → "请选部门视角"
+//   - a non-super user without a department (edge case — shouldn't happen
+//     after the 临时部门 migration) → "未设置部门"
+const noRateHint = computed(() => {
+  if (userStore.isPlatformAdmin || userStore.isTenantSuperAdmin) {
+    return { text: "请选部门视角", title: "超级管理员不归属任何部门，请在顶部筛选选择「部门视角」以指定 固定利润率" };
+  }
+  return { text: "未设置部门", title: "你的账号尚未归属部门，请联系超级管理员设置" };
+});
 
 const delta = computed(() => {
   const it = props.item;
@@ -58,14 +72,17 @@ function stopBubble(e) { e.stopPropagation(); }
       <div class="metric-head">
         <span class="metric-label">{{ item.label }}</span>
         <!-- hasFixedRate=false → user has no department in scope, so there's
-             nothing to subtract. Show a hint chip instead of the live toggle. -->
+             nothing to subtract. Show a hint chip instead of the live toggle.
+             Wording depends on whether the viewer is a super-admin (who
+             never has a department of their own and should pick a 视角)
+             or a non-super user whose account hasn't been assigned yet. -->
         <span
           v-if="isCompanyRate && !store.hasFixedRate"
           class="rate-toggle no-rate"
           @mousedown.stop @click.stop
-          title="未选择部门视角，公司利润率 = 经营利润率"
+          :title="noRateHint.title"
         >
-          <span class="rate-toggle-text">未设置部门</span>
+          <span class="rate-toggle-text">{{ noRateHint.text }}</span>
         </span>
         <span
           v-else-if="isCompanyRate"
