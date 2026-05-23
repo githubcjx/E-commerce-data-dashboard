@@ -160,7 +160,13 @@ async function refreshShops() {
 }
 
 async function loadOwners() {
-  if (!userStore.canManageUsers) return;
+  // Anyone with backend access can read the owner list: super + platform
+  // for full UI, plain admin for the display-name combobox AND (when
+  // their can_manage_scope flag is on) the data-scope picker. Used to
+  // gate this on canManageUsers, which was too narrow — it left plain
+  // admins with an empty 指定负责人 list even after super-admin granted
+  // them the scope-management permission.
+  if (!userStore.isAdmin) return;
   try {
     const data = await listTenantOwners(targetTenantId.value);
     ownersAvailable.value = data.owners || [];
