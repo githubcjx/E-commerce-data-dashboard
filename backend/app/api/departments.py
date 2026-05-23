@@ -1,36 +1,42 @@
 """Per-tenant department management.
 
+Two responsibilities:
+  - Roster:    which users belong to this department (M2M, a user can be in
+               many departments).
+  - 视角店铺:   which shops show up under this department's 部门视角 on the
+               dashboard (one shop ↔ at most one view-department).
+
+Fee data is NOT here anymore — it lives per-shop on the shops table,
+managed in the 店铺管理 panel.
+
 Permission model:
     tenant_super_admin / platform_admin
         - full CRUD on departments inside their tenant (or any tenant for
           platform_admin via ?tenant_id=)
-        - assign / reassign members at create or update time
+        - assign / reassign members + view-shops
     tenant_admin
-        - read-only on the department list (so the user form can show the
-          dropdown labels), and `PATCH /:id/members` to swap members
-          between departments — but cannot change name / rate / create /
-          delete.
+        - read-only on the list (needed to populate dropdowns), plus the
+          right to move members between departments via /api/users
     tenant_user
         - blocked entirely; not surfaced in the UI.
 
 Delete rule:
-    A department with members > 0 cannot be deleted; the super-admin must
-    transfer members out first. This prevents accidentally orphaning users.
+    A department with members > 0 cannot be deleted. Shops that point at
+    this department for either view or fee have those pointers nulled
+    (ON DELETE SET NULL).
 """
-from decimal import Decimal
-
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
 from ..models import (
     Department, ROLE_PLATFORM_ADMIN, ROLE_TENANT_ADMIN, ROLE_TENANT_SUPER_ADMIN,
-    ROLE_TENANT_USER, Tenant, User,
+    Shop, User, UserDepartment,
 )
 from ..schemas import (
-    ApiResponse, DepartmentCreate, DepartmentDetailOut, DepartmentMember,
-    DepartmentOut, DepartmentUpdate,
+    ApiResponse, DepartmentCreate, DepartmentMember, DepartmentOut,
+    DepartmentShop, DepartmentUpdate,
 )
 from ..security import require_backend_access
 
@@ -46,29 +52,62 @@ def _scope_for(actor: User, explicit_tenant_id: int | None) -> int:
 
 
 def _can_manage(actor: User) -> bool:
-    """Can create / delete / rename / set rate. Super or platform only."""
+    """Can create / delete / rename. Super or platform only."""
     return actor.role in (ROLE_PLATFORM_ADMIN, ROLE_TENANT_SUPER_ADMIN)
 
 
 def _can_assign_members(actor: User) -> bool:
-    """Can move users in/out of departments. Plain admin can do this too."""
     return actor.role in (
         ROLE_PLATFORM_ADMIN, ROLE_TENANT_SUPER_ADMIN, ROLE_TENANT_ADMIN,
     )
 
 
-async def _member_count(db: AsyncSession, dept_id: int) -> int:
-    n = await db.scalar(
-        select(func.count(User.id)).where(User.department_id == dept_id)
-    )
-    return int(n or 0)
+# ---------------------------------------------------------------------------
+# Hydration helpers
+# ---------------------------------------------------------------------------
 
+async def _hydrate(db: AsyncSession, depts: list[Department]) -> list[DepartmentOut]:
+    """Bulk-load members + view-shops for the given departments.
 
-def _to_out(dept: Department, member_count: int) -> DepartmentOut:
-    out = DepartmentOut.model_validate(dept)
-    out.fixed_profit_rate = float(dept.fixed_profit_rate)
-    out.member_count = member_count
-    return out
+    Two grouped queries (one per relation) keep this O(1) round-trips per
+    list call instead of O(N).
+    """
+    if not depts:
+        return []
+    dept_ids = [d.id for d in depts]
+
+    # Members per department (via user_departments).
+    member_rows = (await db.execute(
+        select(UserDepartment.department_id, User)
+        .join(User, User.id == UserDepartment.user_id)
+        .where(UserDepartment.department_id.in_(dept_ids))
+        .order_by(User.id.asc())
+    )).all()
+    members_by_dept: dict[int, list[DepartmentMember]] = {d_id: [] for d_id in dept_ids}
+    for dept_id, user in member_rows:
+        members_by_dept[dept_id].append(DepartmentMember.model_validate(user))
+
+    # View-shops per department.
+    shop_rows = (await db.execute(
+        select(Shop).where(Shop.view_department_id.in_(dept_ids)).order_by(Shop.shop_code.asc())
+    )).scalars().all()
+    shops_by_dept: dict[int, list[DepartmentShop]] = {d_id: [] for d_id in dept_ids}
+    for shop in shop_rows:
+        shops_by_dept[shop.view_department_id].append(DepartmentShop(
+            shop_code=shop.shop_code, shop_name=shop.shop_name,
+        ))
+
+    return [
+        DepartmentOut(
+            id=d.id,
+            tenant_id=d.tenant_id,
+            name=d.name,
+            members=members_by_dept.get(d.id, []),
+            view_shops=shops_by_dept.get(d.id, []),
+            created_at=d.created_at,
+        )
+        for d in depts
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -82,39 +121,10 @@ async def list_departments(
     db: AsyncSession = Depends(get_db),
 ):
     scope = _scope_for(actor, tenant_id)
-    rows = (await db.execute(
-        select(Department, func.count(User.id))
-        .outerjoin(User, User.department_id == Department.id)
-        .where(Department.tenant_id == scope)
-        .group_by(Department.id)
-        .order_by(Department.id.asc())
-    )).all()
-    out = [_to_out(d, int(n or 0)) for d, n in rows]
-    return ApiResponse(data=out)
-
-
-@router.get("/{dept_id}", response_model=ApiResponse[DepartmentDetailOut])
-async def get_department(
-    dept_id: int,
-    actor: User = Depends(require_backend_access),
-    db: AsyncSession = Depends(get_db),
-):
-    dept = (await db.execute(select(Department).where(Department.id == dept_id))).scalar_one_or_none()
-    if not dept:
-        raise HTTPException(status_code=404, detail="部门不存在")
-    if actor.role != ROLE_PLATFORM_ADMIN and dept.tenant_id != actor.tenant_id:
-        raise HTTPException(status_code=403, detail="无权查看其他企业的部门")
-    members = (await db.execute(
-        select(User).where(User.department_id == dept_id).order_by(User.id.asc())
+    depts = (await db.execute(
+        select(Department).where(Department.tenant_id == scope).order_by(Department.id.asc())
     )).scalars().all()
-    out = DepartmentDetailOut(
-        id=dept.id, tenant_id=dept.tenant_id, name=dept.name,
-        fixed_profit_rate=float(dept.fixed_profit_rate),
-        member_count=len(members),
-        created_at=dept.created_at,
-        members=[DepartmentMember.model_validate(m) for m in members],
-    )
-    return ApiResponse(data=out)
+    return ApiResponse(data=await _hydrate(db, depts))
 
 
 @router.post("", response_model=ApiResponse[DepartmentOut])
@@ -127,10 +137,6 @@ async def create_department(
         raise HTTPException(status_code=403, detail="仅超级管理员可创建部门")
     scope = _scope_for(actor, body.tenant_id)
 
-    tenant = (await db.execute(select(Tenant).where(Tenant.id == scope))).scalar_one_or_none()
-    if not tenant:
-        raise HTTPException(status_code=404, detail="企业不存在")
-
     dup = (await db.execute(
         select(Department).where(
             Department.tenant_id == scope, Department.name == body.name,
@@ -139,23 +145,18 @@ async def create_department(
     if dup:
         raise HTTPException(status_code=409, detail="部门名称已存在")
 
-    dept = Department(
-        tenant_id=scope,
-        name=body.name,
-        fixed_profit_rate=Decimal(str(body.fixed_profit_rate)).quantize(Decimal("0.0001")),
-        created_by=actor.id,
-    )
+    dept = Department(tenant_id=scope, name=body.name, created_by=actor.id)
     db.add(dept)
-    await db.flush()  # populate dept.id
+    await db.flush()
 
-    # Move requested members into this department. Validate every id is in
-    # the same tenant and is not a super_admin / platform_admin.
     if body.member_ids:
-        await _assign_members(db, dept, body.member_ids)
+        await _set_members(db, dept, body.member_ids)
+    if body.view_shop_codes:
+        await _set_view_shops(db, dept, body.view_shop_codes)
 
     await db.commit()
     await db.refresh(dept)
-    return ApiResponse(data=_to_out(dept, await _member_count(db, dept.id)))
+    return ApiResponse(data=(await _hydrate(db, [dept]))[0])
 
 
 @router.patch("/{dept_id}", response_model=ApiResponse[DepartmentOut])
@@ -172,17 +173,18 @@ async def update_department(
         raise HTTPException(status_code=403, detail="无权修改其他企业的部门")
 
     sent = body.model_fields_set
-    changes_managed_fields = ("name" in sent and body.name is not None) or (
-        "fixed_profit_rate" in sent and body.fixed_profit_rate is not None
-    )
+    changes_name = "name" in sent and body.name is not None
+    changes_view_shops = "view_shop_codes" in sent and body.view_shop_codes is not None
     changes_members = "member_ids" in sent and body.member_ids is not None
 
-    if changes_managed_fields and not _can_manage(actor):
-        raise HTTPException(status_code=403, detail="仅超级管理员可修改部门名称/费率")
+    if changes_name and not _can_manage(actor):
+        raise HTTPException(status_code=403, detail="仅超级管理员可修改部门名称")
+    if changes_view_shops and not _can_manage(actor):
+        raise HTTPException(status_code=403, detail="仅超级管理员可调整部门视角店铺")
     if changes_members and not _can_assign_members(actor):
         raise HTTPException(status_code=403, detail="无权调整部门成员")
 
-    if "name" in sent and body.name is not None and body.name != dept.name:
+    if changes_name and body.name != dept.name:
         dup = (await db.execute(
             select(Department).where(
                 Department.tenant_id == dept.tenant_id,
@@ -194,15 +196,14 @@ async def update_department(
             raise HTTPException(status_code=409, detail="部门名称已存在")
         dept.name = body.name
 
-    if "fixed_profit_rate" in sent and body.fixed_profit_rate is not None:
-        dept.fixed_profit_rate = Decimal(str(body.fixed_profit_rate)).quantize(Decimal("0.0001"))
-
     if changes_members:
-        await _replace_members(db, dept, body.member_ids or [])
+        await _set_members(db, dept, body.member_ids or [])
+    if changes_view_shops:
+        await _set_view_shops(db, dept, body.view_shop_codes or [])
 
     await db.commit()
     await db.refresh(dept)
-    return ApiResponse(data=_to_out(dept, await _member_count(db, dept.id)))
+    return ApiResponse(data=(await _hydrate(db, [dept]))[0])
 
 
 @router.delete("/{dept_id}", response_model=ApiResponse[dict])
@@ -219,9 +220,13 @@ async def delete_department(
     if actor.role != ROLE_PLATFORM_ADMIN and dept.tenant_id != actor.tenant_id:
         raise HTTPException(status_code=403, detail="无权删除其他企业的部门")
 
-    n = await _member_count(db, dept.id)
-    if n > 0:
-        raise HTTPException(status_code=400, detail=f"部门下还有 {n} 位成员，请先迁出后再删除")
+    member_n = await db.scalar(
+        select(func.count(UserDepartment.user_id)).where(UserDepartment.department_id == dept_id)
+    )
+    if member_n:
+        raise HTTPException(
+            status_code=400, detail=f"部门下还有 {member_n} 位成员，请先迁出后再删除",
+        )
 
     await db.delete(dept)
     await db.commit()
@@ -232,46 +237,53 @@ async def delete_department(
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-async def _assign_members(db: AsyncSession, dept: Department, member_ids: list[int]) -> None:
-    """Move the listed users INTO this department.
+async def _set_members(db: AsyncSession, dept: Department, member_ids: list[int]) -> None:
+    """Replace this department's member list. Validates each id belongs
+    to the same tenant and is not a super_admin / platform_admin."""
+    if member_ids:
+        users = (await db.execute(select(User).where(User.id.in_(member_ids)))).scalars().all()
+        if len(users) != len(set(member_ids)):
+            raise HTTPException(status_code=400, detail="部分成员账号不存在")
+        for u in users:
+            if u.tenant_id != dept.tenant_id:
+                raise HTTPException(status_code=400, detail=f"用户 {u.username} 不属于该企业")
+            if u.role in (ROLE_PLATFORM_ADMIN, ROLE_TENANT_SUPER_ADMIN):
+                raise HTTPException(status_code=400, detail=f"超级管理员 {u.username} 不能归属部门")
 
-    Validates every id:
-      - belongs to the same tenant
-      - is not a super_admin / platform_admin (those don't have departments)
-    """
-    if not member_ids:
-        return
-    users = (await db.execute(select(User).where(User.id.in_(member_ids)))).scalars().all()
-    if len(users) != len(member_ids):
-        raise HTTPException(status_code=400, detail="部分成员账号不存在")
-    for u in users:
-        if u.tenant_id != dept.tenant_id:
-            raise HTTPException(status_code=400, detail=f"用户 {u.username} 不属于该企业")
-        if u.role in (ROLE_PLATFORM_ADMIN, ROLE_TENANT_SUPER_ADMIN):
-            raise HTTPException(status_code=400, detail=f"超级管理员 {u.username} 不能归属部门")
-        u.department_id = dept.id
-
-
-async def _replace_members(db: AsyncSession, dept: Department, new_ids: list[int]) -> None:
-    """Make the department's member set exactly == new_ids.
-
-    Users currently in this department but not in new_ids get their
-    department_id cleared (un-assigned). They do NOT auto-move to another
-    department — the caller (super-admin) must reassign explicitly via a
-    subsequent PATCH on the destination department.
-    """
-    current = (await db.execute(
-        select(User).where(User.department_id == dept.id)
+    # Wipe + reseed the department's M2M link list — much simpler than diff.
+    existing = (await db.execute(
+        select(UserDepartment).where(UserDepartment.department_id == dept.id)
     )).scalars().all()
-    new_set = set(new_ids)
-    current_ids = {u.id for u in current}
+    for link in existing:
+        await db.delete(link)
+    await db.flush()
+    for uid in member_ids:
+        db.add(UserDepartment(user_id=uid, department_id=dept.id))
 
-    # Removed members (currently in dept, not in new set).
-    for u in current:
-        if u.id not in new_set:
-            u.department_id = None
 
-    # Added members (in new set, not currently in dept).
-    to_add = [uid for uid in new_ids if uid not in current_ids]
-    if to_add:
-        await _assign_members(db, dept, to_add)
+async def _set_view_shops(db: AsyncSession, dept: Department, shop_codes: list[str]) -> None:
+    """Replace this department's view-shop list.
+
+    Implementation: any shop in this tenant currently pointing at this
+    dept gets its view_department_id cleared, then shop_codes are pointed
+    here. Because Shop.view_department_id is single-valued, picking a
+    shop already owned by another department automatically takes it away
+    from that other department (one-shop ↔ one-view-dept).
+    """
+    # Clear current view-deps that point here.
+    await db.execute(
+        sa_update(Shop)
+        .where(Shop.view_department_id == dept.id)
+        .values(view_department_id=None)
+    )
+    if not shop_codes:
+        return
+    # Point the selected shops at this dept. Shops missing from the table
+    # are silently ignored — the admin shouldn't normally see them in the
+    # picker, but it's safer than 400-ing the whole request.
+    res = await db.execute(
+        sa_update(Shop)
+        .where(Shop.tenant_id == dept.tenant_id, Shop.shop_code.in_(shop_codes))
+        .values(view_department_id=dept.id)
+    )
+    _ = res  # rowcount is informational only

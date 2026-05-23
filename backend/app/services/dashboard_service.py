@@ -17,10 +17,14 @@ Trend chart:
     inside the chosen range (granularity = day | week | month | year). The
     frontend uses ECharts dataZoom to show only a window initially.
 
-Performance:
-    Each endpoint does a single `GROUP BY date` query covering the longest
-    span it needs (typically [prev_start, end_date]) and aggregates buckets
-    in Python. ix_sales_tenant_date covers the predicate.
+公司利润率 (NEW formula):
+    Per-shop: adj_profit_s = profit_s − per_capita_share_s − sales_s × tax_rate_s
+    Aggregate: 公司利润率 = SUM(adj_profit_s) / SUM(sales_s)
+
+    The two values per_capita_share and tax_rate are stored on the shops
+    table; missing shops default to 0 (no deduction). This formula is
+    applied at every aggregation granularity (KPI overall, KPI sparkline
+    buckets, trend chart buckets, category breakdown).
 """
 from __future__ import annotations
 
@@ -31,14 +35,12 @@ from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import (
-    Department, ROLE_PLATFORM_ADMIN, ROLE_TENANT_SUPER_ADMIN, SalesRecord, User,
+    Department, ROLE_PLATFORM_ADMIN, ROLE_TENANT_SUPER_ADMIN, SalesRecord,
+    Shop, User,
 )
 
 
 def effective_scope_owners(user: User) -> list[str] | None:
-    """Return the list of 负责人 the user is restricted to, or None for full
-    access. Super-admin and platform_admin always see everything.
-    """
     if user.role in (ROLE_PLATFORM_ADMIN, ROLE_TENANT_SUPER_ADMIN):
         return None
     return user.data_scope_owners
@@ -52,7 +54,6 @@ class MetricDef:
     higher_is_better: bool
 
 
-# Order here is the *default* layout order on the dashboard.
 METRIC_DEFS: list[MetricDef] = [
     MetricDef("sales", "销售额", "currency", True),
     MetricDef("profit", "利润额", "currency", True),
@@ -64,7 +65,6 @@ METRIC_DEFS: list[MetricDef] = [
     MetricDef("adPct", "营销费用占比", "percent", False),
 ]
 
-# Columns we pull (and sum) once per page render — every KPI derives from these.
 _AGG_COLS = (
     "income_total",
     "actual_income",
@@ -81,25 +81,22 @@ _AGG_COLS = (
 # ---------------------------------------------------------------------------
 
 def normalize_range(start: date, end: date) -> tuple[date, date]:
-    """Swap if user picked them out of order."""
     return (start, end) if start <= end else (end, start)
 
 
 def previous_range(start: date, end: date) -> tuple[date, date]:
-    """Period immediately preceding [start, end] with the same length."""
     span = (end - start).days + 1
     return start - timedelta(days=span), start - timedelta(days=1)
 
 
 def _label_range(start: date, end: date) -> str:
-    """Compact human-readable label for a date range, used in KPI cards."""
     if start == end:
         return start.isoformat()
     return f"{start.isoformat()} ~ {end.isoformat()}"
 
 
 # ---------------------------------------------------------------------------
-# Trend bucketing — group days into K-line points by granularity
+# Trend bucketing
 # ---------------------------------------------------------------------------
 
 def _bucket_day(d: date) -> tuple[date, date, str]:
@@ -138,10 +135,6 @@ _BUCKETERS = {
 
 
 def _enumerate_buckets(start: date, end: date, granularity: str) -> list[tuple[date, date, str]]:
-    """Walk [start, end] producing one bucket per day/week/month/year. Each
-    bucket is clamped to the user's selected range so e.g. picking 5.10–5.20
-    with granularity=week gives a bucket clamped to that 5-day overlap.
-    """
     bucketer = _BUCKETERS.get(granularity, _bucket_day)
     out: list[tuple[date, date, str]] = []
     seen_labels: set[str] = set()
@@ -150,14 +143,61 @@ def _enumerate_buckets(start: date, end: date, granularity: str) -> list[tuple[d
         b_start, b_end, label = bucketer(cur)
         if label not in seen_labels:
             seen_labels.add(label)
-            # Clamp to user's selected range so partial buckets at the edges
-            # only aggregate days the user actually asked for.
             cs = max(b_start, start)
             ce = min(b_end, end)
             out.append((cs, ce, label))
-        # Step to the day after the bucket end to find the next bucket.
         cur = b_end + timedelta(days=1)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Shop-fee + view-department helpers
+# ---------------------------------------------------------------------------
+
+async def shops_in_view_department(
+    session: AsyncSession, tenant_id: int, view_dept_id: int,
+) -> list[str]:
+    """List of shop_codes belonging to the given view-department."""
+    rows = (await session.execute(
+        select(Shop.shop_code)
+        .where(Shop.tenant_id == tenant_id, Shop.view_department_id == view_dept_id)
+    )).all()
+    return [code for (code,) in rows]
+
+
+async def validate_view_department(
+    session: AsyncSession, user: User, view_dept_id: int | None,
+) -> int | None:
+    """Cross-tenant safety: a non-platform_admin's view picker is only
+    allowed to point at departments inside their own tenant. Returns the
+    id if valid, else None (treat as no filter).
+    """
+    if view_dept_id is None:
+        return None
+    dept = (await session.execute(
+        select(Department).where(Department.id == view_dept_id)
+    )).scalar_one_or_none()
+    if not dept:
+        return None
+    if user.role != ROLE_PLATFORM_ADMIN and user.tenant_id is not None and dept.tenant_id != user.tenant_id:
+        return None
+    return view_dept_id
+
+
+async def shop_fees_map(
+    session: AsyncSession, tenant_id: int, shop_codes: list[str] | None = None,
+) -> dict[str, tuple[float, float]]:
+    """Return {shop_code: (per_capita_share, ship_service_tax_rate)} for the
+    tenant. If shop_codes is given, limit to those shops; missing shops
+    are simply not in the map and default to (0, 0) at the call site.
+    """
+    stmt = select(
+        Shop.shop_code, Shop.per_capita_share, Shop.ship_service_tax_rate,
+    ).where(Shop.tenant_id == tenant_id)
+    if shop_codes:
+        stmt = stmt.where(Shop.shop_code.in_(shop_codes))
+    rows = (await session.execute(stmt)).all()
+    return {code: (float(share or 0), float(tax or 0)) for code, share, tax in rows}
 
 
 # ---------------------------------------------------------------------------
@@ -172,18 +212,11 @@ def _apply_filters(
 ):
     """Common WHERE clauses for every dashboard query.
 
-    The three picker filters are now lists (multi-select). Conventions:
-      None  → no filter (the picker is in "全部" mode, all values match)
-      []    → same as None (caller may pass either)
-      [..]  → SalesRecord.col IN (this list)
+    Multi-select arrays:
+      None / [] → no filter
+      [..]      → col IN (this list)
 
-    scope_owners enforces per-user data isolation on top:
-      None → no extra restriction (super_admin / platform_admin)
-      []   → match nothing (user explicitly scoped to no owners)
-      [..] → SalesRecord.owner IN (this list)
-
-    When BOTH the user picked specific owners AND scope_owners is set, the
-    effective filter is the intersection — only owners in both lists match.
+    scope_owners enforces per-user data isolation; intersects with owner picker.
     """
     stmt = stmt.where(SalesRecord.tenant_id == tenant_id)
     if shop_codes:
@@ -191,17 +224,12 @@ def _apply_filters(
     if categories:
         stmt = stmt.where(SalesRecord.category.in_(categories))
 
-    # Owners interact with scope_owners — intersect when both are constrained.
     if scope_owners is None:
-        # No data-scope restriction → just apply the picker (if any).
         if owners:
             stmt = stmt.where(SalesRecord.owner.in_(owners))
     elif not scope_owners:
-        # User is scoped to nothing — return empty regardless of picker.
         stmt = stmt.where(SalesRecord.id == -1)
     else:
-        # Both lists constrain: take the intersection. If the picker picked
-        # owners that aren't in scope, the result is empty.
         if owners:
             inter = [o for o in owners if o in set(scope_owners)]
             if not inter:
@@ -213,7 +241,7 @@ def _apply_filters(
     return stmt
 
 
-async def _daily_aggregates(
+async def _daily_aggregates_by_shop(
     session: AsyncSession,
     tenant_id: int,
     start: date,
@@ -222,12 +250,17 @@ async def _daily_aggregates(
     owners: list[str] | None,
     categories: list[str] | None,
     scope_owners: list[str] | None = None,
-) -> dict[date, dict[str, float]]:
-    """One query: GROUP BY date over [start, end], return {date: {col: float}}."""
+) -> dict[date, dict[str, dict[str, float]]]:
+    """Group BY (date, shop_code) so 公司利润率 can compute per-shop fee
+    deductions before aggregating across shops.
+
+    Returns {date: {shop_code: {col: float, ...}}}.
+    """
     if start > end:
         return {}
     cols = (
         SalesRecord.date,
+        SalesRecord.shop_code,
         func.coalesce(func.sum(SalesRecord.income_total), 0).label("income_total"),
         func.coalesce(func.sum(SalesRecord.actual_income), 0).label("actual_income"),
         func.coalesce(func.sum(SalesRecord.refund_total), 0).label("refund_total"),
@@ -237,52 +270,71 @@ async def _daily_aggregates(
         func.coalesce(func.sum(SalesRecord.marketing_cost), 0).label("marketing_cost"),
     )
     stmt = select(*cols).where(and_(SalesRecord.date >= start, SalesRecord.date <= end))
-    stmt = _apply_filters(stmt, tenant_id, shop_codes, owners, categories, scope_owners).group_by(SalesRecord.date)
+    stmt = _apply_filters(stmt, tenant_id, shop_codes, owners, categories, scope_owners)
+    stmt = stmt.group_by(SalesRecord.date, SalesRecord.shop_code)
     rows = (await session.execute(stmt)).all()
-    return {
-        r.date: {col: float(getattr(r, col) or 0) for col in _AGG_COLS}
-        for r in rows
-    }
 
-
-def _sum_range(daily: dict[date, dict[str, float]], start: date, end: date) -> dict[str, float]:
-    out = {col: 0.0 for col in _AGG_COLS}
-    if start > end:
-        return out
-    for d, vals in daily.items():
-        if start <= d <= end:
-            for col in _AGG_COLS:
-                out[col] += vals[col]
+    out: dict[date, dict[str, dict[str, float]]] = {}
+    for r in rows:
+        d = r.date
+        sc = r.shop_code or ""
+        out.setdefault(d, {})[sc] = {col: float(getattr(r, col) or 0) for col in _AGG_COLS}
     return out
 
 
-def _kpis_from_sums(sums: dict[str, float], fixed_profit_rate: float, subtract_fixed: bool) -> dict[str, float]:
-    """Compute every KPI from a single set of summed columns.
+def _sum_range_by_shop(
+    daily: dict[date, dict[str, dict[str, float]]], start: date, end: date,
+) -> dict[str, dict[str, float]]:
+    """Aggregate the per-(date, shop) buckets over a date range into per-shop sums."""
+    out: dict[str, dict[str, float]] = {}
+    if start > end:
+        return out
+    for d, by_shop in daily.items():
+        if not (start <= d <= end):
+            continue
+        for sc, vals in by_shop.items():
+            agg = out.setdefault(sc, {col: 0.0 for col in _AGG_COLS})
+            for col in _AGG_COLS:
+                agg[col] += vals[col]
+    return out
 
-    fixed_profit_rate is the per-tenant 公司利润率 base; subtract_fixed
-    toggles whether the 公司利润率 metric actually applies the deduction
-    (when off, it just mirrors 经营利润率).
+
+def _kpis_from_per_shop(
+    per_shop: dict[str, dict[str, float]],
+    fees: dict[str, tuple[float, float]],
+) -> dict[str, float]:
+    """Compute every KPI from per-shop sums + per-shop fees.
+
+    公司利润率 = SUM(profit_s − per_capita_share_s − sales_s × tax_s) / SUM(sales_s).
+    Other metrics aggregate the standard way (sum cols across shops).
     """
-    gmv = sums["income_total"] or sums["actual_income"]
-    cost = sums["cost_total"]
-    profit = sums["profit"]
-    refund = sums["refund_total"]
+    total = {col: 0.0 for col in _AGG_COLS}
+    adj_profit_total = 0.0
+    for sc, sums in per_shop.items():
+        for col in _AGG_COLS:
+            total[col] += sums[col]
+        share, tax_rate = fees.get(sc, (0.0, 0.0))
+        sales_s = sums["income_total"] or sums["actual_income"]
+        profit_s = sums["profit"]
+        adj_profit_total += profit_s - share - sales_s * tax_rate
+
+    gmv = total["income_total"] or total["actual_income"]
+    cost = total["cost_total"]
+    profit = total["profit"]
+    refund = total["refund_total"]
 
     def pct(num: float, den: float) -> float:
         return (num / den * 100) if den else 0.0
 
-    profit_rate = pct(profit, gmv)
-    company_profit_rate = profit_rate - (fixed_profit_rate * 100 if subtract_fixed else 0)
-
     return {
         "sales": gmv,
         "profit": profit,
-        "profitRate": profit_rate,
-        "companyProfitRate": company_profit_rate,
+        "profitRate": pct(profit, gmv),
+        "companyProfitRate": pct(adj_profit_total, gmv),
         "grossMargin": pct(gmv - cost, gmv),
         "refundRate": pct(refund, gmv),
-        "shipPct": pct(sums["shipping_cost"], gmv),
-        "adPct": pct(sums["marketing_cost"], gmv),
+        "shipPct": pct(total["shipping_cost"], gmv),
+        "adPct": pct(total["marketing_cost"], gmv),
     }
 
 
@@ -292,68 +344,105 @@ def _delta_pct(curr: float, prev: float) -> float | None:
     return (curr - prev) / abs(prev) * 100
 
 
-async def resolve_fixed_rate(
-    session: AsyncSession, user: User, view_department_id: int | None = None,
-) -> tuple[float, bool]:
-    """Pick the 固定利润率 to apply for the logged-in user.
-
-    Returns (rate, has_rate). When has_rate is False, callers should still
-    proceed with rate=0 so 公司利润率 mirrors 经营利润率 instead of
-    silently zeroing out — but the API response will flag this so the
-    frontend can show '—' or a prompt.
-
-    Resolution order:
-      1. view_department_id (super-admin's "以部门视角查看" picker).
-      2. user.department_id (the user's own department).
-      3. None → has_rate=False.
-    """
-    dept_id = view_department_id if view_department_id is not None else user.department_id
-    if dept_id is None:
-        return 0.0, False
-    row = (await session.execute(
-        select(Department.fixed_profit_rate, Department.tenant_id)
-        .where(Department.id == dept_id)
-    )).first()
-    if row is None:
-        return 0.0, False
-    rate, dept_tenant = row
-    # Cross-tenant safety: a tenant_super_admin's view picker is only allowed
-    # to point at departments of their own tenant. Treat mismatch as no-rate.
-    if user.role != ROLE_PLATFORM_ADMIN and user.tenant_id is not None and dept_tenant != user.tenant_id:
-        return 0.0, False
-    return float(rate or 0), True
-
-
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
 
+async def _resolve_shop_codes(
+    session: AsyncSession, tenant_id: int, user: User,
+    shop_codes: list[str] | None, view_department_id: int | None,
+) -> list[str] | None:
+    """Intersect the user-picked shop_codes with the view-department's
+    shop list (if a view-department is in play).
+
+    Returns:
+      None  → no shop filter (the picker was 全部 and no view dept)
+      []    → no shops match (view dept is empty, or intersection is empty)
+              — caller should treat as "match nothing" rather than "全部"
+      [..]  → final shop filter list
+
+    Note the "[]" sentinel: when the view-dept picker is set but the dept
+    has no shops yet, we DO want an empty result, not "fall back to no
+    filter". The dashboard code below converts [] into a tautologically
+    false WHERE so the response is empty.
+    """
+    view_dept_id = await validate_view_department(session, user, view_department_id)
+    if view_dept_id is None:
+        return shop_codes if shop_codes else None
+    view_shops = await shops_in_view_department(session, tenant_id, view_dept_id)
+    if not shop_codes:
+        return view_shops  # may be []
+    # Intersect; preserve the user's order
+    allowed = set(view_shops)
+    inter = [s for s in shop_codes if s in allowed]
+    return inter  # may be []
+
+
+def _bake_empty_filter(stmt):
+    """Force a query to return no rows — used when the resolved shop list
+    is an empty list (intentional 0-match), not None."""
+    return stmt.where(SalesRecord.id == -1)
+
+
 async def get_kpis(
     session, tenant_id, start_date, end_date, granularity,
     shop_codes, owners, categories,
-    subtract_fixed: bool = True, scope_owners: list[str] | None = None,
-    fixed_profit_rate: float = 0.0, has_fixed_rate: bool = True,
+    subtract_fixed: bool = True,  # kept for backwards compat, no longer used
+    scope_owners: list[str] | None = None,
+    view_department_id: int | None = None,
+    user: User | None = None,
 ):
     start_date, end_date = normalize_range(start_date, end_date)
     prev_start, prev_end = previous_range(start_date, end_date)
-    # If no rate is in scope (super-admin with no view-as picker, or user
-    # without a department), force subtract_fixed off so 公司利润率 mirrors
-    # 经营利润率 instead of silently subtracting 0.
-    effective_subtract = subtract_fixed and has_fixed_rate
-    fixed = fixed_profit_rate
 
-    # One query covers prev + current span; series buckets are inside current.
-    daily = await _daily_aggregates(
-        session, tenant_id, prev_start, end_date, shop_codes, owners, categories, scope_owners
+    resolved_codes = await _resolve_shop_codes(
+        session, tenant_id, user, shop_codes, view_department_id,
+    )
+    # An empty list (vs None) means "force empty result". Skip the queries
+    # and synthesize zeroed KPIs so the frontend renders cleanly.
+    if resolved_codes == []:
+        empty_per_shop: dict[str, dict[str, float]] = {}
+        fees: dict[str, tuple[float, float]] = {}
+        curr_kpi = _kpis_from_per_shop(empty_per_shop, fees)
+        prev_kpi = _kpis_from_per_shop(empty_per_shop, fees)
+        buckets = _enumerate_buckets(start_date, end_date, granularity)
+        zero_series = [0.0] * len(buckets)
+        items = []
+        for m in METRIC_DEFS:
+            items.append({
+                "key": m.key, "label": m.label,
+                "value": 0.0, "prev": 0.0, "delta_pct": None,
+                "higher_is_better": m.higher_is_better, "format": m.format,
+                "series": zero_series.copy(),
+            })
+        return {
+            "items": items, "start_date": start_date, "end_date": end_date,
+            "granularity": granularity,
+            "current_label": _label_range(start_date, end_date),
+            "previous_label": _label_range(prev_start, prev_end),
+        }
+
+    daily = await _daily_aggregates_by_shop(
+        session, tenant_id, prev_start, end_date,
+        resolved_codes, owners, categories, scope_owners,
     )
 
-    curr_kpi = _kpis_from_sums(_sum_range(daily, start_date, end_date), fixed, effective_subtract)
-    prev_kpi = _kpis_from_sums(_sum_range(daily, prev_start, prev_end), fixed, effective_subtract)
+    # Single query for shop-fee lookup (limited to shops actually in scope).
+    all_shop_codes = set()
+    for by_shop in daily.values():
+        all_shop_codes.update(by_shop.keys())
+    fees = await shop_fees_map(session, tenant_id, list(all_shop_codes))
+
+    curr_per_shop = _sum_range_by_shop(daily, start_date, end_date)
+    prev_per_shop = _sum_range_by_shop(daily, prev_start, prev_end)
+    curr_kpi = _kpis_from_per_shop(curr_per_shop, fees)
+    prev_kpi = _kpis_from_per_shop(prev_per_shop, fees)
 
     buckets = _enumerate_buckets(start_date, end_date, granularity)
     series_by_metric: dict[str, list[float]] = {m.key: [] for m in METRIC_DEFS}
     for b_start, b_end, _label in buckets:
-        bucket_kpi = _kpis_from_sums(_sum_range(daily, b_start, b_end), fixed, effective_subtract)
+        bucket_per_shop = _sum_range_by_shop(daily, b_start, b_end)
+        bucket_kpi = _kpis_from_per_shop(bucket_per_shop, fees)
         for m in METRIC_DEFS:
             series_by_metric[m.key].append(bucket_kpi[m.key])
 
@@ -376,32 +465,46 @@ async def get_kpis(
         "granularity": granularity,
         "current_label": _label_range(start_date, end_date),
         "previous_label": _label_range(prev_start, prev_end),
-        "fixed_profit_rate": fixed,
-        "has_fixed_rate": has_fixed_rate,
-        "subtract_fixed": effective_subtract,
     }
 
 
 async def get_trend(
     session, tenant_id, start_date, end_date, granularity, metric,
-    shop_codes, owners, categories, subtract_fixed: bool = True,
+    shop_codes, owners, categories,
+    subtract_fixed: bool = True,
     scope_owners: list[str] | None = None,
-    fixed_profit_rate: float = 0.0, has_fixed_rate: bool = True,
+    view_department_id: int | None = None,
+    user: User | None = None,
 ):
     if metric not in {m.key for m in METRIC_DEFS}:
         metric = "sales"
     start_date, end_date = normalize_range(start_date, end_date)
-    effective_subtract = subtract_fixed and has_fixed_rate
-    fixed = fixed_profit_rate
 
-    daily = await _daily_aggregates(
-        session, tenant_id, start_date, end_date, shop_codes, owners, categories, scope_owners
+    resolved_codes = await _resolve_shop_codes(
+        session, tenant_id, user, shop_codes, view_department_id,
     )
+    if resolved_codes == []:
+        buckets = _enumerate_buckets(start_date, end_date, granularity)
+        return {
+            "metric": metric,
+            "points": [{"date": label, "value": 0.0} for _, _, label in buckets],
+            "granularity": granularity,
+        }
+
+    daily = await _daily_aggregates_by_shop(
+        session, tenant_id, start_date, end_date,
+        resolved_codes, owners, categories, scope_owners,
+    )
+    all_shop_codes = set()
+    for by_shop in daily.values():
+        all_shop_codes.update(by_shop.keys())
+    fees = await shop_fees_map(session, tenant_id, list(all_shop_codes))
 
     buckets = _enumerate_buckets(start_date, end_date, granularity)
     points = []
     for b_start, b_end, label in buckets:
-        bucket_kpi = _kpis_from_sums(_sum_range(daily, b_start, b_end), fixed, effective_subtract)
+        bucket_per_shop = _sum_range_by_shop(daily, b_start, b_end)
+        bucket_kpi = _kpis_from_per_shop(bucket_per_shop, fees)
         points.append({"date": label, "value": bucket_kpi[metric]})
     return {"metric": metric, "points": points, "granularity": granularity}
 
@@ -409,24 +512,29 @@ async def get_trend(
 async def get_category_breakdown(
     session, tenant_id, start_date, end_date,
     shop_codes, owners, categories,
-    subtract_fixed: bool = True, scope_owners: list[str] | None = None,
-    fixed_profit_rate: float = 0.0, has_fixed_rate: bool = True,
+    subtract_fixed: bool = True,
+    scope_owners: list[str] | None = None,
+    view_department_id: int | None = None,
+    user: User | None = None,
 ):
     """Per-category aggregate with prev-period 环比 on sales + profit.
 
-    Two queries (current + previous), then merge in Python by category name.
-
-    `categories` is honored here too: if the user picks specific categories,
-    only those show up in the breakdown (with their own current+prev values).
+    公司利润率 inside a category row uses the same per-shop formula:
+    aggregate (date, shop) within that category, look up fees, and apply.
     """
     start_date, end_date = normalize_range(start_date, end_date)
     prev_start, prev_end = previous_range(start_date, end_date)
-    effective_subtract = subtract_fixed and has_fixed_rate
-    fixed = fixed_profit_rate
+
+    resolved_codes = await _resolve_shop_codes(
+        session, tenant_id, user, shop_codes, view_department_id,
+    )
+    if resolved_codes == []:
+        return []
 
     def _select_for(start: date, end: date):
         cols = (
             SalesRecord.category,
+            SalesRecord.shop_code,
             func.coalesce(func.sum(SalesRecord.income_total), 0).label("income_total"),
             func.coalesce(func.sum(SalesRecord.actual_income), 0).label("actual_income"),
             func.coalesce(func.sum(SalesRecord.refund_total), 0).label("refund_total"),
@@ -434,61 +542,68 @@ async def get_category_breakdown(
             func.coalesce(func.sum(SalesRecord.profit), 0).label("profit"),
             func.coalesce(func.sum(SalesRecord.shipping_cost), 0).label("shipping_cost"),
         )
-        stmt = select(*cols).where(and_(SalesRecord.date >= start, SalesRecord.date <= end)).group_by(SalesRecord.category)
-        return _apply_filters(stmt, tenant_id, shop_codes, owners, categories, scope_owners)
+        stmt = select(*cols).where(and_(SalesRecord.date >= start, SalesRecord.date <= end))
+        stmt = _apply_filters(stmt, tenant_id, resolved_codes, owners, categories, scope_owners)
+        return stmt.group_by(SalesRecord.category, SalesRecord.shop_code)
 
     curr_rows = (await session.execute(_select_for(start_date, end_date))).all()
     prev_rows = (await session.execute(_select_for(prev_start, prev_end))).all()
 
-    def to_sums(r):
-        return {
-            "income_total": float(r.income_total or 0),
-            "actual_income": float(r.actual_income or 0),
-            "refund_total": float(r.refund_total or 0),
-            "cost_total": float(r.cost_total or 0),
-            "profit": float(r.profit or 0),
-            "shipping_cost": float(r.shipping_cost or 0),
-            # marketing_cost isn't displayed in the category table, but
-            # _kpis_from_sums expects it — pad with 0.
-            "marketing_cost": 0.0,
-        }
+    # Collect all shop codes seen so we can fetch fees in one query.
+    all_codes: set[str] = set()
+    for r in curr_rows:
+        all_codes.add(r.shop_code or "")
+    for r in prev_rows:
+        all_codes.add(r.shop_code or "")
+    fees = await shop_fees_map(session, tenant_id, list(all_codes))
 
-    prev_by_cat = {r.category: to_sums(r) for r in prev_rows}
+    def to_per_shop_per_cat(rows):
+        """{category: {shop_code: {col: value, ...}}}"""
+        out: dict[str, dict[str, dict[str, float]]] = {}
+        for r in rows:
+            cat = r.category or "(未分类)"
+            sums = {
+                "income_total": float(r.income_total or 0),
+                "actual_income": float(r.actual_income or 0),
+                "refund_total": float(r.refund_total or 0),
+                "cost_total": float(r.cost_total or 0),
+                "profit": float(r.profit or 0),
+                "shipping_cost": float(r.shipping_cost or 0),
+                "marketing_cost": 0.0,  # not in category SELECT — pad
+            }
+            out.setdefault(cat, {})[r.shop_code or ""] = sums
+        return out
+
+    curr_by_cat = to_per_shop_per_cat(curr_rows)
+    prev_by_cat = to_per_shop_per_cat(prev_rows)
 
     out = []
-    for r in curr_rows:
-        cat = r.category or "(未分类)"
-        sums = to_sums(r)
-        kpi = _kpis_from_sums(sums, fixed, effective_subtract)
-
-        # 环比 for sales + profit
-        prev = prev_by_cat.get(r.category)
-        prev_sales = (prev["income_total"] or prev["actual_income"]) if prev else 0.0
-        prev_profit = prev["profit"] if prev else 0.0
+    for cat, per_shop in curr_by_cat.items():
+        kpi = _kpis_from_per_shop(per_shop, fees)
+        prev_per_shop = prev_by_cat.get(cat, {})
+        prev_kpi = _kpis_from_per_shop(prev_per_shop, fees) if prev_per_shop else {
+            "sales": 0.0, "profit": 0.0,
+        }
 
         out.append({
             "name": cat,
             "sales": kpi["sales"],
-            "sales_prev": prev_sales,
-            "sales_delta_pct": _delta_pct(kpi["sales"], prev_sales),
+            "sales_prev": prev_kpi.get("sales", 0.0),
+            "sales_delta_pct": _delta_pct(kpi["sales"], prev_kpi.get("sales", 0.0)),
             "profit": kpi["profit"],
-            "profit_prev": prev_profit,
-            "profit_delta_pct": _delta_pct(kpi["profit"], prev_profit),
+            "profit_prev": prev_kpi.get("profit", 0.0),
+            "profit_delta_pct": _delta_pct(kpi["profit"], prev_kpi.get("profit", 0.0)),
             "company_profit_rate": kpi["companyProfitRate"],
             "gross_margin": kpi["grossMargin"],
             "refund_rate": kpi["refundRate"],
             "ship_pct": kpi["shipPct"],
         })
-    # Sort by sales desc for stable display
     out.sort(key=lambda x: x["sales"], reverse=True)
     return out
 
 
 async def get_filters(session, tenant_id, scope_owners: list[str] | None = None):
-    """Filter dropdowns + data bounds. When the user is scoped to specific
-    owners, the dropdown only surfaces those names — so they can't even
-    "see" the existence of owners outside their scope.
-    """
+    """Filter dropdowns + data bounds."""
     shop_stmt = select(SalesRecord.shop_code, SalesRecord.shop_name).where(SalesRecord.tenant_id == tenant_id).distinct()
     shops = [{"code": code, "name": name or code} for code, name in (await session.execute(shop_stmt)).all() if code]
 
@@ -498,9 +613,6 @@ async def get_filters(session, tenant_id, scope_owners: list[str] | None = None)
         )).all()
         owners = sorted(o for (o,) in owner_rows if o)
     else:
-        # Restrict to the user's allowed set, intersected with what actually
-        # exists in the data (so a typo'd scope entry just disappears from
-        # the dropdown rather than erroring).
         if not scope_owners:
             owners = []
         else:
@@ -517,8 +629,6 @@ async def get_filters(session, tenant_id, scope_owners: list[str] | None = None)
             select(SalesRecord.category).where(SalesRecord.tenant_id == tenant_id).distinct()
         )).all() if c
     )
-    # Earliest / latest data dates. Frontend uses these to span the year-mode
-    # trend chart across all years of available data.
     bounds = (await session.execute(
         select(func.min(SalesRecord.date), func.max(SalesRecord.date))
         .where(SalesRecord.tenant_id == tenant_id)

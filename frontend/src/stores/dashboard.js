@@ -77,7 +77,6 @@ export const useDashboardStore = defineStore("dashboard", {
     shopCodes: [],
     owners: [],
     categories: [],
-    subtractFixed: true,          // 公司利润率 是否减去固定利润率
 
     activeMetric: "sales",
     panelOrder: DEFAULT_ORDER.slice(),
@@ -85,24 +84,19 @@ export const useDashboardStore = defineStore("dashboard", {
 
     kpiItems: [],
     trendPoints: [],
-    trendGranularityServed: "day", // granularity the points were actually fetched for
+    trendGranularityServed: "day",
     categoryRows: [],
     filters: { shops: [], owners: [], categories: [], date_min: null, date_max: null },
 
     // Period labels surfaced into the UI (KPI cards say "对比 5.1~5.7")
     currentLabel: "",
     previousLabel: "",
-    // Currently-applied 固定利润率 — comes from the *logged-in user's*
-    // department (or, for super-admins, the department they picked in the
-    // "以部门视角查看" dropdown). hasFixedRate is false when no department
-    // is in scope; in that case 公司利润率 mirrors 经营利润率 and we show
-    // a hint in the UI.
-    fixedProfitRate: 0.13,
-    hasFixedRate: true,
 
-    // Super-admin "以部门视角查看" picker. Plain user → null (and uses their
-    // own department implicitly). List populated by loadDepartments().
+    // 部门视角 picker — picks which department's view-shops to restrict
+    // the dashboard to. null = no restriction.
     viewDepartmentId: null,
+    // Full department list (id, name, view_shops). Used to filter the shop
+    // dropdown when a 部门视角 is selected.
     departmentOptions: [],
 
     loading: false,
@@ -119,10 +113,19 @@ export const useDashboardStore = defineStore("dashboard", {
         shop_code: csv(state.shopCodes),
         owner: csv(state.owners),
         category: csv(state.categories),
-        subtract_fixed: state.subtractFixed,
       };
       if (state.viewDepartmentId != null) p.view_department_id = state.viewDepartmentId;
       return p;
+    },
+    // Shops the user can currently pick from the 店铺 multi-select.
+    // - 部门视角 set → only that department's view_shops
+    // - otherwise   → all shops in this tenant
+    availableShops(state) {
+      if (state.viewDepartmentId == null) return state.filters.shops || [];
+      const dept = state.departmentOptions.find((d) => d.id === state.viewDepartmentId);
+      if (!dept) return [];
+      const codes = new Set((dept.view_shops || []).map((s) => s.shop_code));
+      return (state.filters.shops || []).filter((s) => codes.has(s.code));
     },
   },
   actions: {
@@ -139,19 +142,11 @@ export const useDashboardStore = defineStore("dashboard", {
       } catch (_) { this.departmentOptions = []; }
     },
     async loadKpi() {
-      // Sparklines use their own auto-derived bucketing (range-length based)
-      // so they stay readable independent of the user's chosen top tab.
       const granularity = kpiSparklineGranularity(this.startDate, this.endDate);
       const data = await fetchKpi({ ...this._baseParams, granularity });
       this.kpiItems = data.items || [];
       this.currentLabel = data.current_label || "";
       this.previousLabel = data.previous_label || "";
-      if (typeof data.fixed_profit_rate === "number") {
-        this.fixedProfitRate = data.fixed_profit_rate;
-      }
-      if (typeof data.has_fixed_rate === "boolean") {
-        this.hasFixedRate = data.has_fixed_rate;
-      }
     },
     async loadTrend() {
       // Trend chart now mirrors the top filter exactly — same range, same
@@ -165,13 +160,10 @@ export const useDashboardStore = defineStore("dashboard", {
       this.trendGranularityServed = data.granularity || this.topGranularity;
     },
     async loadCategory() {
-      // Category endpoint also honors the category picker — passing all
-      // three lets the user narrow to a subset of categories if they want.
       const {
-        start_date, end_date, shop_code, owner, category, subtract_fixed,
-        view_department_id,
+        start_date, end_date, shop_code, owner, category, view_department_id,
       } = this._baseParams;
-      const params = { start_date, end_date, shop_code, owner, category, subtract_fixed };
+      const params = { start_date, end_date, shop_code, owner, category };
       if (view_department_id != null) params.view_department_id = view_department_id;
       this.categoryRows = await fetchCategory(params);
     },
@@ -194,7 +186,6 @@ export const useDashboardStore = defineStore("dashboard", {
           this.panelOrder = [...cleaned, ...missing];
         }
         if (Array.isArray(parsed.sections)) this.sectionOrder = parsed.sections;
-        if (typeof parsed.subtractFixed === "boolean") this.subtractFixed = parsed.subtractFixed;
         if (typeof parsed.topGranularity === "string" &&
             ["day", "week", "month", "year"].includes(parsed.topGranularity)) {
           this.topGranularity = parsed.topGranularity;
@@ -211,7 +202,6 @@ export const useDashboardStore = defineStore("dashboard", {
       await saveLayout(JSON.stringify({
         order: this.panelOrder,
         sections: this.sectionOrder,
-        subtractFixed: this.subtractFixed,
         topGranularity: this.topGranularity,
       }));
     },
@@ -242,15 +232,15 @@ export const useDashboardStore = defineStore("dashboard", {
       this.endDate = end;
       await this.loadAll();
     },
-    async setSubtractFixed(v) {
-      this.subtractFixed = !!v;
-      await Promise.all([this.persistLayout(), this.loadAll()]);
-    },
     async setViewDepartmentId(id) {
-      // Super-admin only — switches which department's 固定利润率 is
-      // applied to the dashboard. null = "no view picked"; the backend will
-      // then report has_fixed_rate=false and 公司利润率 mirrors 经营利润率.
+      // Picking a 部门视角 limits dashboard data to that department's
+      // view-shops. Drop any currently-selected shop codes that aren't
+      // in the new visible set, since they'd silently disappear from
+      // the dropdown anyway.
       this.viewDepartmentId = id == null ? null : Number(id);
+      const shops = this.availableShops;
+      const visibleCodes = new Set(shops.map((s) => s.code));
+      this.shopCodes = this.shopCodes.filter((c) => visibleCodes.has(c));
       await this.loadAll();
     },
   },

@@ -3,24 +3,24 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
-from ..models import Department, TENANT_STATUS_DISABLED, Tenant, User
+from ..models import Department, TENANT_STATUS_DISABLED, Tenant, User, UserDepartment
 from ..rate_limit import check_login_allowed, record_login_failure, record_login_success
-from ..schemas import ApiResponse, LoginRequest, LoginResponse, TenantBrief, UserOut
+from ..schemas import ApiResponse, DepartmentBrief, LoginRequest, LoginResponse, TenantBrief, UserOut
 from ..security import create_token, get_current_user, verify_password
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
-async def _user_out_with_department(db: AsyncSession, user: User) -> UserOut:
-    """UserOut hydrated with department_name + department_fixed_profit_rate."""
+async def _user_out_with_departments(db: AsyncSession, user: User) -> UserOut:
+    """UserOut hydrated with departments[] (the M2M list)."""
     out = UserOut.model_validate(user)
-    if user.department_id is not None:
-        dept = (await db.execute(
-            select(Department).where(Department.id == user.department_id)
-        )).scalar_one_or_none()
-        if dept:
-            out.department_name = dept.name
-            out.department_fixed_profit_rate = float(dept.fixed_profit_rate)
+    rows = (await db.execute(
+        select(Department)
+        .join(UserDepartment, UserDepartment.department_id == Department.id)
+        .where(UserDepartment.user_id == user.id)
+        .order_by(Department.id.asc())
+    )).scalars().all()
+    out.departments = [DepartmentBrief.model_validate(d) for d in rows]
     return out
 
 
@@ -51,7 +51,7 @@ async def login(body: LoginRequest, request: Request, db: AsyncSession = Depends
     return ApiResponse(data=LoginResponse(
         token=token,
         expire_at=expire,
-        user=await _user_out_with_department(db, user),
+        user=await _user_out_with_departments(db, user),
         tenant=tenant_brief,
     ))
 
@@ -68,6 +68,6 @@ async def me(user: User = Depends(get_current_user), db: AsyncSession = Depends(
     return ApiResponse(data=LoginResponse(
         token="",
         expire_at=datetime.now(timezone.utc),
-        user=await _user_out_with_department(db, user),
+        user=await _user_out_with_departments(db, user),
         tenant=tenant_brief,
     ))

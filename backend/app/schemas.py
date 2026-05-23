@@ -29,18 +29,23 @@ class TenantBrief(BaseModel):
         from_attributes = True
 
 
+class DepartmentBrief(BaseModel):
+    id: int
+    name: str
+
+    class Config:
+        from_attributes = True
+
+
 class UserOut(BaseModel):
     id: int
     username: str
     role: str
     tenant_id: int | None = None
     display_name: str | None = None
-    department_id: int | None = None
-    department_name: str | None = None
-    # Per-user department fixed_profit_rate (denormalized into the user row
-    # for the dashboard to read on its own login — avoids an extra round trip).
-    # NULL for super_admin / platform_admin (no department).
-    department_fixed_profit_rate: float | None = None
+    # Users now belong to MANY departments (M2M). Empty list for super-admins
+    # and for users who haven't been assigned yet.
+    departments: list[DepartmentBrief] = []
     # NULL means "unrestricted" (super_admin & platform_admin behave that way
     # regardless of stored value). An empty list means "scoped to nothing".
     data_scope_owners: list[str] | None = None
@@ -93,9 +98,9 @@ class UserCreate(BaseModel):
     # is *not* assignable here — it's reserved for the initial tenant account.
     role: str = Field(default="tenant_user")
     display_name: str | None = Field(default=None, max_length=64)
-    # Department to drop the new user into. Required for non-super roles
-    # (validated at the API layer to keep the error message friendly).
-    department_id: int | None = None
+    # Departments the new user belongs to (M2M). Required (non-empty) for
+    # non-super roles; validated at the API layer.
+    department_ids: list[int] = Field(default_factory=list)
     # NULL = unrestricted (default). List of owner names = scoped view.
     data_scope_owners: list[str] | None = None
     # Only honored when actor is platform_admin (used from /admin/users?tenant_id=).
@@ -106,8 +111,8 @@ class UserUpdate(BaseModel):
     password: str | None = Field(default=None, min_length=6, max_length=128)
     role: str | None = None
     display_name: str | None = Field(default=None, max_length=64)
-    # Transfer a user to a different department. Omit to leave unchanged.
-    department_id: int | None = None
+    # Replace the user's department set wholesale. Omit to leave unchanged.
+    department_ids: list[int] | None = None
     # Sent as a list to set scope, or as null to clear (= unrestricted).
     # Omit the key entirely to leave scope unchanged.
     data_scope_owners: list[str] | None = None
@@ -125,36 +130,90 @@ class DepartmentMember(BaseModel):
         from_attributes = True
 
 
+class DepartmentShop(BaseModel):
+    """Shop summary for the department list — just enough to render the
+    chip column "店铺 +N" in the admin view."""
+    shop_code: str
+    shop_name: str | None = None
+
+
 class DepartmentOut(BaseModel):
     id: int
     tenant_id: int
     name: str
-    fixed_profit_rate: float
-    member_count: int = 0
+    # Full member / view-shop lists are surfaced inline so the list view can
+    # show "前 3 + N" without an extra round-trip. The frontend slices
+    # locally — these are bounded by the tenant size (typically < 100).
+    members: list[DepartmentMember] = []
+    view_shops: list[DepartmentShop] = []
     created_at: datetime
 
     class Config:
         from_attributes = True
 
 
-class DepartmentDetailOut(DepartmentOut):
-    members: list[DepartmentMember] = []
-
-
 class DepartmentCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
-    fixed_profit_rate: float = Field(..., ge=0, lt=1)
     member_ids: list[int] = Field(default_factory=list)
+    # Shops shown under this department's 部门视角 on the dashboard. A shop
+    # belongs to AT MOST ONE view-department — moving it here removes it
+    # from any other department's view list.
+    view_shop_codes: list[str] = Field(default_factory=list)
     # Honored only when actor is platform_admin (multi-tenant management).
     tenant_id: int | None = None
 
 
 class DepartmentUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=100)
-    fixed_profit_rate: float | None = Field(default=None, ge=0, lt=1)
     # If present, replaces the member list wholesale (members not in the new
     # list are unassigned; members newly in the list are assigned).
     member_ids: list[int] | None = None
+    # If present, replaces the view-shop list wholesale.
+    view_shop_codes: list[str] | None = None
+
+
+# ---------- Shops ----------
+
+class ShopOut(BaseModel):
+    id: int
+    tenant_id: int
+    shop_code: str
+    shop_name: str | None = None
+    view_department_id: int | None = None
+    view_department_name: str | None = None
+    fee_department_id: int | None = None
+    fee_department_name: str | None = None
+    per_capita_share: float = 0.0
+    ship_service_tax_rate: float = 0.0
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ShopUpdate(BaseModel):
+    """PATCH /api/shops/{shop_code} — only updates non-None fields."""
+    view_department_id: int | None = None
+    fee_department_id: int | None = None
+    per_capita_share: float | None = Field(default=None, ge=0)
+    ship_service_tax_rate: float | None = Field(default=None, ge=0, lt=1)
+
+
+class ShopFeeBatchUpdate(BaseModel):
+    """Apply one fee config to many shops at once.
+
+    Used by the 店铺管理 dialog: pick a fee_department_id + the two numeric
+    values, then assign the bundle to a multi-select of shop_codes. The
+    selected shops have their previous fee config replaced; other shops
+    are untouched. A shop_code listed here unconditionally has its
+    fee_department_id pointed at this config, so 'one shop ↔ one fee
+    config' is enforced automatically.
+    """
+    fee_department_id: int = Field(..., gt=0)
+    per_capita_share: float = Field(..., ge=0)
+    ship_service_tax_rate: float = Field(..., ge=0, lt=1)
+    shop_codes: list[str] = Field(default_factory=list)
 
 
 # ---------- Import ----------

@@ -5,8 +5,9 @@ import {
   listUsers, createUser, updateUser, deleteUser, listTenantOwners,
 } from "../api/users";
 import {
-  listDepartments, createDepartment, updateDepartment, deleteDepartment, getDepartment,
+  listDepartments, createDepartment, updateDepartment, deleteDepartment,
 } from "../api/departments";
+import { listShops, applyShopFeeBatch } from "../api/shops";
 import {
   useUserStore, ROLE_PLATFORM, ROLE_TENANT_SUPER, ROLE_TENANT_ADMIN, ROLE_TENANT_USER,
 } from "../stores/user";
@@ -17,13 +18,11 @@ const ui = useUiStore();
 const route = useRoute();
 const router = useRouter();
 
-// ---------------------------------------------------------------------------
-// Tab switch — 用户管理 / 部门管理
-// ---------------------------------------------------------------------------
+// Tab switch: 用户管理 / 部门管理 / 店铺管理
 const activeTab = ref("users");
 
 // ---------------------------------------------------------------------------
-// Target tenant
+// Target tenant resolution (unchanged from before)
 // ---------------------------------------------------------------------------
 const targetTenantId = computed(() => {
   if (userStore.isPlatformAdmin) {
@@ -40,14 +39,12 @@ const targetTenantLabel = computed(() => {
 });
 
 // ---------------------------------------------------------------------------
-// Permission helpers — mirror backend
+// Permission helpers
 // ---------------------------------------------------------------------------
 const me = computed(() => userStore.user);
 const canCreate = computed(() => userStore.canManageUsers);
-// Department management: super_admin / platform_admin can create / delete /
-// rename / change rate. Plain admin can only reassign members via the user
-// edit dialog (not via the department dialog).
 const canManageDepartments = computed(() => userStore.canManageUsers);
+const canManageShops = computed(() => userStore.canManageUsers);
 
 function canEditTarget(t) {
   if (!me.value) return false;
@@ -105,13 +102,21 @@ function scopeSummary(u) {
   return u.data_scope_owners.join(" / ");
 }
 
+// Render "前 N + N" for long member/shop lists in the department row.
+function previewList(items, getLabel, n = 3) {
+  if (!items || !items.length) return { shown: [], more: 0 };
+  const labels = items.map(getLabel);
+  return { shown: labels.slice(0, n), more: Math.max(0, labels.length - n) };
+}
+
 // ---------------------------------------------------------------------------
-// Users + departments data
+// Data loading
 // ---------------------------------------------------------------------------
 const users = ref([]);
 const departments = ref([]);
+const shops = ref([]);
 const loading = ref(false);
-const ownersAvailable = ref([]);   // 负责人 list — feeds combobox + scope picker
+const ownersAvailable = ref([]);
 
 async function refreshUsers() {
   if (userStore.isPlatformAdmin && !targetTenantId.value) {
@@ -130,7 +135,16 @@ async function refreshDepartments() {
     return;
   }
   try { departments.value = await listDepartments(targetTenantId.value); }
-  catch (e) { ui.showToast(e.message || "部门列表加载失败", "error"); }
+  catch (e) { ui.showToast(e.message || "部门加载失败", "error"); }
+}
+
+async function refreshShops() {
+  if (userStore.isPlatformAdmin && !targetTenantId.value) {
+    shops.value = [];
+    return;
+  }
+  try { shops.value = await listShops(targetTenantId.value); }
+  catch (e) { ui.showToast(e.message || "店铺加载失败", "error"); }
 }
 
 async function loadOwners() {
@@ -141,20 +155,14 @@ async function loadOwners() {
   } catch (_) { ownersAvailable.value = []; }
 }
 
-function deptLabel(deptId) {
-  if (!deptId) return "—";
-  const d = departments.value.find((x) => x.id === deptId);
-  return d ? d.name : "—";
-}
-
 // ---------------------------------------------------------------------------
-// User create / edit dialog
+// User dialog
 // ---------------------------------------------------------------------------
 const dialogOpen = ref(false);
 const editing = ref(null);
 const form = ref({
   username: "", password: "", role: ROLE_TENANT_USER, display_name: "",
-  department_id: null,
+  department_ids: [],
   scope_mode: "all",
   scope_owners: [],
 });
@@ -163,7 +171,6 @@ const usernameErr = ref("");
 const passwordErr = ref("");
 const departmentErr = ref("");
 
-// Combobox state for display_name / 负责人 picker.
 const ownerComboOpen = ref(false);
 const ownerComboQuery = ref("");
 const ownerComboFiltered = computed(() => {
@@ -183,7 +190,7 @@ function openCreate() {
   editing.value = null;
   form.value = {
     username: "", password: "", role: ROLE_TENANT_USER, display_name: "",
-    department_id: departments.value[0]?.id || null,
+    department_ids: departments.value[0] ? [departments.value[0].id] : [],
     scope_mode: "all", scope_owners: [],
   };
   resetErrors();
@@ -196,7 +203,7 @@ function openEdit(u) {
   const mode = u.data_scope_owners === null || u.data_scope_owners === undefined ? "all" : "selected";
   form.value = {
     username: u.username, password: "", role: u.role, display_name: u.display_name || "",
-    department_id: u.department_id || null,
+    department_ids: (u.departments || []).map((d) => d.id),
     scope_mode: mode,
     scope_owners: Array.isArray(u.data_scope_owners) ? u.data_scope_owners.slice() : [],
   };
@@ -211,13 +218,9 @@ const dialogAllowsPrivileged = computed(() => {
   return canEditPrivileged(editing.value);
 });
 
-// When creating (or editing a non-super), department must be picked. Super
-// admins editing themselves don't even see the department row, so the check
-// only applies when the row is visible.
 const departmentRequired = computed(() => {
   if (!dialogOpen.value) return false;
   if (!editing.value) {
-    // create-mode: required for assignable roles (tenant_user / tenant_admin)
     return form.value.role === ROLE_TENANT_USER || form.value.role === ROLE_TENANT_ADMIN;
   }
   return editing.value.role === ROLE_TENANT_USER || editing.value.role === ROLE_TENANT_ADMIN;
@@ -229,9 +232,13 @@ function toggleScopeOwner(name) {
   if (i === -1) arr.push(name); else arr.splice(i, 1);
 }
 
-// Pick a 负责人 from the combobox. Auto-fills data_scope_owners with just
-// that name (one-shot convenience — the user can keep editing the scope
-// list afterwards).
+function toggleDeptId(id) {
+  const arr = form.value.department_ids;
+  const i = arr.indexOf(id);
+  if (i === -1) arr.push(id); else arr.splice(i, 1);
+  departmentErr.value = "";
+}
+
 function pickOwner(name) {
   form.value.display_name = name;
   ownerComboQuery.value = name;
@@ -256,8 +263,8 @@ function validateForCreate() {
   if (!p) { passwordErr.value = "密码不能为空"; ok = false; }
   else if (p.length < PASSWORD_MIN) { passwordErr.value = `密码至少 ${PASSWORD_MIN} 位`; ok = false; }
   else if (p.length > PASSWORD_MAX) { passwordErr.value = `密码不能超过 ${PASSWORD_MAX} 个字符`; ok = false; }
-  if (departmentRequired.value && !form.value.department_id) {
-    departmentErr.value = "请选择部门"; ok = false;
+  if (departmentRequired.value && !form.value.department_ids.length) {
+    departmentErr.value = "请至少选择一个部门"; ok = false;
   }
   return ok;
 }
@@ -269,8 +276,8 @@ function validateForEdit() {
     passwordErr.value = `密码至少 ${PASSWORD_MIN} 位，最多 ${PASSWORD_MAX} 位`;
     ok = false;
   }
-  if (departmentRequired.value && !form.value.department_id) {
-    departmentErr.value = "请选择部门"; ok = false;
+  if (departmentRequired.value && !form.value.department_ids.length) {
+    departmentErr.value = "请至少选择一个部门"; ok = false;
   }
   return ok;
 }
@@ -298,10 +305,11 @@ async function submit() {
           body.data_scope_owners = newScope;
         }
       }
-      // Department transfer — both super and plain admin can do this when
-      // the dialog allowed editing of this target at all.
-      if (departmentRequired.value && form.value.department_id !== editing.value.department_id) {
-        body.department_id = form.value.department_id;
+      // Department membership — send when differing.
+      const newDepts = form.value.department_ids.slice().sort();
+      const oldDepts = (editing.value.departments || []).map((d) => d.id).sort();
+      if (JSON.stringify(newDepts) !== JSON.stringify(oldDepts)) {
+        body.department_ids = newDepts;
       }
       await updateUser(editing.value.id, body);
       ui.showToast("已更新", "success");
@@ -311,7 +319,7 @@ async function submit() {
         password: form.value.password,
         role: form.value.role,
         display_name: form.value.display_name || null,
-        department_id: form.value.department_id,
+        department_ids: form.value.department_ids.slice(),
         data_scope_owners: form.value.scope_mode === "all" ? null : form.value.scope_owners.slice(),
       };
       if (userStore.isPlatformAdmin) body.tenant_id = targetTenantId.value;
@@ -319,8 +327,7 @@ async function submit() {
       ui.showToast("已新增", "success");
     }
     dialogOpen.value = false;
-    await refreshUsers();
-    await refreshDepartments(); // member counts may have changed
+    await Promise.all([refreshUsers(), refreshDepartments()]);
   } catch (e) {
     formError.value = e.message || "保存失败";
   }
@@ -331,29 +338,25 @@ async function remove(u) {
   try {
     await deleteUser(u.id);
     ui.showToast("已删除", "success");
-    await refreshUsers();
-    await refreshDepartments();
+    await Promise.all([refreshUsers(), refreshDepartments()]);
   } catch (e) {
     ui.showToast(e.message || "删除失败", "error");
   }
 }
 
 // ---------------------------------------------------------------------------
-// Department create / edit dialog
+// Department dialog
 // ---------------------------------------------------------------------------
 const deptDialogOpen = ref(false);
 const editingDept = ref(null);
 const deptForm = ref({
   name: "",
-  rate_pct: "13",   // string for the input; converted to decimal on submit
-  member_ids: [],   // user ids currently checked
+  member_ids: [],
+  view_shop_codes: [],
 });
 const deptFormError = ref("");
 const deptNameErr = ref("");
-const deptRateErr = ref("");
 
-// Users assignable to a department: anyone in this tenant whose role is
-// tenant_admin or tenant_user (super_admin is excluded by spec).
 const assignableUsers = computed(() => users.value.filter(
   (u) => u.role === ROLE_TENANT_ADMIN || u.role === ROLE_TENANT_USER,
 ));
@@ -361,29 +364,23 @@ const assignableUsers = computed(() => users.value.filter(
 function resetDeptErrors() {
   deptFormError.value = "";
   deptNameErr.value = "";
-  deptRateErr.value = "";
 }
 
 function openDeptCreate() {
   editingDept.value = null;
-  deptForm.value = { name: "", rate_pct: "13", member_ids: [] };
+  deptForm.value = { name: "", member_ids: [], view_shop_codes: [] };
   resetDeptErrors();
   deptDialogOpen.value = true;
 }
 
-async function openDeptEdit(d) {
+function openDeptEdit(d) {
   editingDept.value = d;
   deptForm.value = {
     name: d.name,
-    rate_pct: (Number(d.fixed_profit_rate) * 100).toFixed(2).replace(/\.?0+$/, ""),
-    member_ids: [],
+    member_ids: (d.members || []).map((m) => m.id),
+    view_shop_codes: (d.view_shops || []).map((s) => s.shop_code),
   };
   resetDeptErrors();
-  // Fetch detail to get current member list (the list view returns counts only).
-  try {
-    const detail = await getDepartment(d.id);
-    deptForm.value.member_ids = (detail.members || []).map((m) => m.id);
-  } catch (_) { /* keep empty */ }
   deptDialogOpen.value = true;
 }
 
@@ -392,6 +389,22 @@ function toggleDeptMember(uid) {
   const i = arr.indexOf(uid);
   if (i === -1) arr.push(uid); else arr.splice(i, 1);
 }
+function toggleDeptShop(code) {
+  const arr = deptForm.value.view_shop_codes;
+  const i = arr.indexOf(code);
+  if (i === -1) arr.push(code); else arr.splice(i, 1);
+}
+
+// Which other department currently owns this shop's view (for the picker
+// hint)? Returns null if it's free or already in this department.
+function shopCurrentViewDept(shopCode) {
+  if (!shopCode) return null;
+  for (const d of departments.value) {
+    if (editingDept.value && d.id === editingDept.value.id) continue;
+    if ((d.view_shops || []).some((s) => s.shop_code === shopCode)) return d;
+  }
+  return null;
+}
 
 function validateDeptForm() {
   let ok = true;
@@ -399,9 +412,6 @@ function validateDeptForm() {
   deptForm.value.name = name;
   if (!name) { deptNameErr.value = "部门名称不能为空"; ok = false; }
   else if (name.length > 100) { deptNameErr.value = "部门名称不能超过 100 个字符"; ok = false; }
-  const pct = Number(deptForm.value.rate_pct);
-  if (!Number.isFinite(pct)) { deptRateErr.value = "请输入数字"; ok = false; }
-  else if (pct < 0 || pct >= 100) { deptRateErr.value = "请输入 0–99.99 之间的数字"; ok = false; }
   return ok;
 }
 
@@ -409,56 +419,154 @@ async function submitDept() {
   resetDeptErrors();
   if (!validateDeptForm()) return;
 
-  const rate = Number(deptForm.value.rate_pct) / 100;
   try {
     if (editingDept.value) {
       const body = {};
       if (deptForm.value.name !== editingDept.value.name) body.name = deptForm.value.name;
-      const oldRate = Number(editingDept.value.fixed_profit_rate);
-      if (Math.abs(rate - oldRate) > 1e-9) body.fixed_profit_rate = rate;
       body.member_ids = deptForm.value.member_ids.slice();
+      body.view_shop_codes = deptForm.value.view_shop_codes.slice();
       await updateDepartment(editingDept.value.id, body);
       ui.showToast("已更新部门", "success");
     } else {
       const body = {
         name: deptForm.value.name,
-        fixed_profit_rate: rate,
         member_ids: deptForm.value.member_ids.slice(),
+        view_shop_codes: deptForm.value.view_shop_codes.slice(),
       };
       if (userStore.isPlatformAdmin) body.tenant_id = targetTenantId.value;
       await createDepartment(body);
       ui.showToast("已新增部门", "success");
     }
     deptDialogOpen.value = false;
-    await refreshDepartments();
-    await refreshUsers();
+    await Promise.all([refreshDepartments(), refreshUsers(), refreshShops()]);
   } catch (e) {
     deptFormError.value = e.message || "保存失败";
   }
 }
 
 async function removeDept(d) {
-  if (d.member_count > 0) {
-    ui.showToast(`部门下还有 ${d.member_count} 位成员，请先迁出后再删除`, "error");
+  if ((d.members || []).length > 0) {
+    ui.showToast(`部门下还有 ${d.members.length} 位成员，请先迁出后再删除`, "error");
     return;
   }
   if (!confirm(`确认删除部门「${d.name}」？`)) return;
   try {
     await deleteDepartment(d.id);
     ui.showToast("已删除", "success");
-    await refreshDepartments();
+    await Promise.all([refreshDepartments(), refreshShops()]);
   } catch (e) {
     ui.showToast(e.message || "删除失败", "error");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Shops dialog
+// ---------------------------------------------------------------------------
+const shopDialogOpen = ref(false);
+const editingShop = ref(null); // null = create-new, otherwise pre-populate
+const shopForm = ref({
+  fee_department_id: null,
+  per_capita_share: "0",
+  ship_service_tax_rate_pct: "0", // pct, converted to fraction on save
+  shop_codes: [],
+});
+const shopFormError = ref("");
+const shopFeeDeptErr = ref("");
+const shopShareErr = ref("");
+const shopTaxErr = ref("");
+
+function resetShopErrors() {
+  shopFormError.value = "";
+  shopFeeDeptErr.value = "";
+  shopShareErr.value = "";
+  shopTaxErr.value = "";
+}
+
+function openShopCreate() {
+  // "New" = a fresh fee config to apply to N shops.
+  editingShop.value = null;
+  shopForm.value = {
+    fee_department_id: departments.value[0]?.id || null,
+    per_capita_share: "0",
+    ship_service_tax_rate_pct: "0",
+    shop_codes: [],
+  };
+  resetShopErrors();
+  shopDialogOpen.value = true;
+}
+
+function openShopEdit(shop) {
+  // Pre-populate from one shop's current config; the multi-select starts
+  // with just that shop, but the admin can extend to apply this same
+  // config to additional shops.
+  editingShop.value = shop;
+  shopForm.value = {
+    fee_department_id: shop.fee_department_id,
+    per_capita_share: String(Number(shop.per_capita_share || 0)),
+    ship_service_tax_rate_pct: (Number(shop.ship_service_tax_rate || 0) * 100).toFixed(2).replace(/\.?0+$/, ""),
+    shop_codes: [shop.shop_code],
+  };
+  resetShopErrors();
+  shopDialogOpen.value = true;
+}
+
+function toggleShopFormCode(code) {
+  const arr = shopForm.value.shop_codes;
+  const i = arr.indexOf(code);
+  if (i === -1) arr.push(code); else arr.splice(i, 1);
+}
+
+// Which fee-department currently owns this shop (for the picker hint)?
+function shopCurrentFeeDept(shopCode) {
+  if (!shopCode) return null;
+  const s = shops.value.find((x) => x.shop_code === shopCode);
+  if (!s || !s.fee_department_id) return null;
+  if (editingShop.value && s.fee_department_id === shopForm.value.fee_department_id) return null;
+  return { id: s.fee_department_id, name: s.fee_department_name };
+}
+
+function validateShopForm() {
+  let ok = true;
+  if (!shopForm.value.fee_department_id) { shopFeeDeptErr.value = "请选择费用所属部门"; ok = false; }
+  const share = Number(shopForm.value.per_capita_share);
+  if (!Number.isFinite(share) || share < 0) { shopShareErr.value = "请输入大于等于 0 的数字"; ok = false; }
+  const taxPct = Number(shopForm.value.ship_service_tax_rate_pct);
+  if (!Number.isFinite(taxPct) || taxPct < 0 || taxPct >= 100) {
+    shopTaxErr.value = "请输入 0–99.99 之间的数字"; ok = false;
+  }
+  if (!shopForm.value.shop_codes.length) {
+    shopFormError.value = "请至少选择一个店铺";
+    ok = false;
+  }
+  return ok;
+}
+
+async function submitShop() {
+  resetShopErrors();
+  if (!validateShopForm()) return;
+  const body = {
+    fee_department_id: shopForm.value.fee_department_id,
+    per_capita_share: Number(shopForm.value.per_capita_share),
+    ship_service_tax_rate: Number(shopForm.value.ship_service_tax_rate_pct) / 100,
+    shop_codes: shopForm.value.shop_codes.slice(),
+  };
+  try {
+    const r = await applyShopFeeBatch(body, targetTenantId.value);
+    ui.showToast(`已更新 ${r.updated} 个店铺的费用配置`, "success");
+    shopDialogOpen.value = false;
+    await refreshShops();
+  } catch (e) {
+    shopFormError.value = e.message || "保存失败";
   }
 }
 
 function backToTenants() { router.push({ name: "tenants" }); }
 
 onMounted(async () => {
-  await Promise.all([refreshDepartments(), refreshUsers(), loadOwners()]);
+  await Promise.all([refreshDepartments(), refreshUsers(), refreshShops(), loadOwners()]);
 });
 watch(() => route.query.tenant_id, async () => {
-  await Promise.all([refreshDepartments(), refreshUsers(), loadOwners()]);
+  await Promise.all([refreshDepartments(), refreshUsers(), refreshShops(), loadOwners()]);
 });
 </script>
 
@@ -466,26 +574,16 @@ watch(() => route.query.tenant_id, async () => {
   <section class="panel">
     <header class="panel-head">
       <div class="tabs-wrap">
-        <button
-          :class="['tab-pill', { 'is-active': activeTab === 'users' }]"
-          @click="activeTab = 'users'"
-        >用户管理</button>
-        <button
-          :class="['tab-pill', { 'is-active': activeTab === 'departments' }]"
-          @click="activeTab = 'departments'"
-        >部门管理</button>
+        <button :class="['tab-pill', { 'is-active': activeTab === 'users' }]" @click="activeTab = 'users'">用户管理</button>
+        <button :class="['tab-pill', { 'is-active': activeTab === 'departments' }]" @click="activeTab = 'departments'">部门管理</button>
+        <button :class="['tab-pill', { 'is-active': activeTab === 'shops' }]" @click="activeTab = 'shops'">店铺管理</button>
       </div>
       <span class="panel-subtitle" v-if="targetTenantLabel">{{ targetTenantLabel }}</span>
       <div class="panel-actions">
         <button v-if="userStore.isPlatformAdmin" class="btn ghost sm" @click="backToTenants">← 返回企业列表</button>
-        <button
-          v-if="activeTab === 'users' && canCreate"
-          class="btn primary sm" @click="openCreate"
-        >+ 新增账号</button>
-        <button
-          v-if="activeTab === 'departments' && canManageDepartments"
-          class="btn primary sm" @click="openDeptCreate"
-        >+ 新增部门</button>
+        <button v-if="activeTab === 'users' && canCreate" class="btn primary sm" @click="openCreate">+ 新增账号</button>
+        <button v-if="activeTab === 'departments' && canManageDepartments" class="btn primary sm" @click="openDeptCreate">+ 新增部门</button>
+        <button v-if="activeTab === 'shops' && canManageShops" class="btn primary sm" @click="openShopCreate">+ 新增费用配置</button>
       </div>
     </header>
 
@@ -509,8 +607,9 @@ watch(() => route.query.tenant_id, async () => {
           <td style="text-align:left">
             <span :class="roleTagClass(u.role)">{{ roleLabel(u.role) }}</span>
           </td>
-          <td style="text-align:left" :class="u.department_name ? '' : 't-muted'">
-            {{ u.department_name || '—' }}
+          <td style="text-align:left" :class="(u.departments || []).length ? '' : 't-muted'">
+            <template v-if="(u.departments || []).length">{{ u.departments.map((d) => d.name).join(' / ') }}</template>
+            <template v-else>—</template>
           </td>
           <td style="text-align:left" :class="(u.role === 'tenant_user' || u.role === 'tenant_admin') && u.data_scope_owners !== null && u.data_scope_owners !== undefined ? '' : 't-muted'">
             {{ scopeSummary(u) }}
@@ -529,11 +628,11 @@ watch(() => route.query.tenant_id, async () => {
     </table>
 
     <!-- ===================== DEPARTMENTS TAB =================== -->
-    <table v-else class="tbl">
+    <table v-else-if="activeTab === 'departments'" class="tbl">
       <thead>
         <tr>
           <th style="text-align:left">部门名称</th>
-          <th style="text-align:left">固定利润率</th>
+          <th style="text-align:left">店铺</th>
           <th style="text-align:left">成员</th>
           <th style="text-align:left">创建时间</th>
           <th style="text-align:right">操作</th>
@@ -542,23 +641,65 @@ watch(() => route.query.tenant_id, async () => {
       <tbody>
         <tr v-for="d in departments" :key="d.id">
           <td style="text-align:left">{{ d.name }}</td>
-          <td style="text-align:left" class="mono">{{ (Number(d.fixed_profit_rate) * 100).toFixed(2).replace(/\.?0+$/, "") }}%</td>
-          <td style="text-align:left">{{ d.member_count }} 人</td>
+          <td style="text-align:left" :class="(d.view_shops || []).length ? '' : 't-muted'">
+            <template v-if="(d.view_shops || []).length">
+              {{ previewList(d.view_shops, (s) => s.shop_name || s.shop_code).shown.join('、') }}
+              <span v-if="previewList(d.view_shops, () => '').more" class="more-tag" :title="d.view_shops.map((s) => s.shop_name || s.shop_code).join('、')">
+                +{{ previewList(d.view_shops, () => '').more }}
+              </span>
+            </template>
+            <template v-else>—</template>
+          </td>
+          <td style="text-align:left" :class="(d.members || []).length ? '' : 't-muted'">
+            <template v-if="(d.members || []).length">
+              {{ previewList(d.members, (m) => m.display_name || m.username).shown.join('、') }}
+              <span v-if="previewList(d.members, () => '').more" class="more-tag" :title="d.members.map((m) => m.display_name || m.username).join('、')">
+                +{{ previewList(d.members, () => '').more }}
+              </span>
+            </template>
+            <template v-else>—</template>
+          </td>
           <td style="text-align:left" class="t-muted">{{ new Date(d.created_at).toLocaleString("zh-CN", { hour12: false }) }}</td>
           <td>
             <button v-if="canManageDepartments" class="btn ghost sm" @click="openDeptEdit(d)">编辑</button>
-            <button
-              v-if="canManageDepartments"
-              class="btn ghost sm"
-              @click="removeDept(d)"
-              style="color:var(--neg)"
-              :title="d.member_count > 0 ? '请先迁出成员后再删除' : ''"
-            >删除</button>
+            <button v-if="canManageDepartments" class="btn ghost sm" @click="removeDept(d)" style="color:var(--neg)">删除</button>
             <span v-if="!canManageDepartments" class="t-muted" style="font-size:12px">—</span>
           </td>
         </tr>
         <tr v-if="!departments.length">
           <td colspan="5" class="empty-state">暂无部门，请先「新增部门」</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <!-- ======================= SHOPS TAB ======================= -->
+    <table v-else class="tbl">
+      <thead>
+        <tr>
+          <th style="text-align:left">店铺</th>
+          <th style="text-align:left">费用所属部门</th>
+          <th style="text-align:left">固定费用（人员均摊）</th>
+          <th style="text-align:left">百分比费用（发货客服税费）</th>
+          <th style="text-align:left">创建时间</th>
+          <th style="text-align:left">更新时间</th>
+          <th style="text-align:right">操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr v-for="s in shops" :key="s.id">
+          <td style="text-align:left">{{ s.shop_name || s.shop_code }}<span class="mono t-muted" style="margin-left:6px;font-size:11px">{{ s.shop_code }}</span></td>
+          <td style="text-align:left" :class="s.fee_department_name ? '' : 't-muted'">{{ s.fee_department_name || '—' }}</td>
+          <td style="text-align:left" class="mono">{{ Number(s.per_capita_share || 0).toLocaleString('en-US') }}</td>
+          <td style="text-align:left" class="mono">{{ (Number(s.ship_service_tax_rate || 0) * 100).toFixed(2).replace(/\.?0+$/, '') }}%</td>
+          <td style="text-align:left" class="t-muted">{{ new Date(s.created_at).toLocaleString("zh-CN", { hour12: false }) }}</td>
+          <td style="text-align:left" class="t-muted">{{ new Date(s.updated_at).toLocaleString("zh-CN", { hour12: false }) }}</td>
+          <td>
+            <button v-if="canManageShops" class="btn ghost sm" @click="openShopEdit(s)">编辑</button>
+            <span v-else class="t-muted" style="font-size:12px">—</span>
+          </td>
+        </tr>
+        <tr v-if="!shops.length">
+          <td colspan="7" class="empty-state">暂无店铺（导入数据后会自动出现在这里）</td>
         </tr>
       </tbody>
     </table>
@@ -573,42 +714,23 @@ watch(() => route.query.tenant_id, async () => {
       </header>
       <div class="modal-body">
         <div class="field" :class="{ 'has-error': usernameErr }">
-          <label>
-            账号
-            <span v-if="!editing" class="req-mark" title="必填">*</span>
-          </label>
-          <input
-            :disabled="!!editing"
-            v-model="form.username"
-            placeholder="至少 2 个字符"
-            autocomplete="off"
-            @input="usernameErr = ''"
-          />
+          <label>账号 <span v-if="!editing" class="req-mark" title="必填">*</span></label>
+          <input :disabled="!!editing" v-model="form.username" placeholder="至少 2 个字符" autocomplete="off" @input="usernameErr = ''" />
           <div v-if="usernameErr" class="field-error">{{ usernameErr }}</div>
         </div>
         <div class="field" :class="{ 'has-error': passwordErr }">
           <label>
-            密码
-            <span v-if="!editing" class="req-mark" title="必填">*</span>
+            密码 <span v-if="!editing" class="req-mark" title="必填">*</span>
             <span v-if="editing" class="t-muted" style="font-size:11px">（留空则不修改）</span>
           </label>
-          <input
-            type="password"
-            v-model="form.password"
-            placeholder="至少 6 位"
-            autocomplete="new-password"
-            @input="passwordErr = ''"
-          />
+          <input type="password" v-model="form.password" placeholder="至少 6 位" autocomplete="new-password" @input="passwordErr = ''" />
           <div v-if="passwordErr" class="field-error">{{ passwordErr }}</div>
         </div>
 
-        <!-- 显示名 / 负责人 combobox. Free-text input + dropdown that filters
-             the tenant's known 负责人 list. Picking from the dropdown auto-
-             fills the data-scope below. -->
         <div class="field">
           <label>
             显示名 / 负责人
-            <span class="t-muted" style="font-size:11px">（可从下拉选择已有负责人，也可输入新名）</span>
+            <span class="t-muted" style="font-size:11px">（可下拉选择已有负责人，也可输入新名）</span>
           </label>
           <div class="combobox" @click.stop>
             <input
@@ -619,39 +741,29 @@ watch(() => route.query.tenant_id, async () => {
               @input="ownerComboQuery = form.display_name; ownerComboOpen = true"
             />
             <div v-if="ownerComboOpen && ownerComboFiltered.length" class="combo-pop">
-              <button
-                v-for="n in ownerComboFiltered"
-                :key="n" type="button" class="combo-item"
-                @click.stop="pickOwner(n)"
-              >{{ n }}</button>
+              <button v-for="n in ownerComboFiltered" :key="n" type="button" class="combo-item" @click.stop="pickOwner(n)">{{ n }}</button>
             </div>
           </div>
         </div>
 
-        <!-- Department — required for tenant_admin / tenant_user -->
-        <div
-          v-if="departmentRequired"
-          class="field"
-          :class="{ 'has-error': departmentErr }"
-        >
+        <!-- Departments: multi-select. A user can belong to many. -->
+        <div v-if="departmentRequired" class="field" :class="{ 'has-error': departmentErr }">
           <label>
-            所属部门
-            <span class="req-mark" title="必填">*</span>
+            所属部门 <span class="req-mark" title="必填">*</span>
+            <span class="t-muted" style="font-size:11px">（可多选）</span>
           </label>
-          <select class="select" v-model.number="form.department_id" @change="departmentErr = ''">
-            <option :value="null" disabled>请选择部门</option>
-            <option v-for="d in departments" :key="d.id" :value="d.id">
-              {{ d.name }} · {{ (Number(d.fixed_profit_rate) * 100).toFixed(2).replace(/\.?0+$/, "") }}%
-            </option>
-          </select>
-          <div v-if="departmentErr" class="field-error">{{ departmentErr }}</div>
-          <div v-if="!departments.length" class="t-muted" style="font-size:11px;margin-top:4px">
-            当前企业暂无部门，请先到「部门管理」新增。
+          <div class="owner-pick">
+            <div v-if="!departments.length" class="t-muted" style="font-size:12px">
+              当前企业暂无部门，请先到「部门管理」新增。
+            </div>
+            <label v-for="d in departments" :key="d.id" class="owner-chip">
+              <input type="checkbox" :checked="form.department_ids.includes(d.id)" @change="toggleDeptId(d.id)" />
+              <span>{{ d.name }}</span>
+            </label>
           </div>
+          <div v-if="departmentErr" class="field-error">{{ departmentErr }}</div>
         </div>
 
-        <!-- Role + scope only when actor can change them. Plain admin
-             editing a 普通用户 sees neither. -->
         <template v-if="dialogAllowsPrivileged">
           <div class="field">
             <label>角色</label>
@@ -659,21 +771,16 @@ watch(() => route.query.tenant_id, async () => {
               <option value="tenant_user">普通用户</option>
               <option value="tenant_admin">管理员</option>
             </select>
-            <div class="t-muted" style="font-size:11px;margin-top:4px">
-              管理员有后台权限（只能编辑普通用户、调整部门成员），普通用户无后台。
-            </div>
           </div>
 
           <div class="field">
             <label>数据查看范围</label>
             <div class="scope-mode">
               <label class="scope-radio">
-                <input type="radio" value="all" v-model="form.scope_mode" />
-                全部数据
+                <input type="radio" value="all" v-model="form.scope_mode" />全部数据
               </label>
               <label class="scope-radio">
-                <input type="radio" value="selected" v-model="form.scope_mode" />
-                指定负责人
+                <input type="radio" value="selected" v-model="form.scope_mode" />指定负责人
               </label>
             </div>
             <div v-if="form.scope_mode === 'selected'" class="owner-pick">
@@ -681,16 +788,9 @@ watch(() => route.query.tenant_id, async () => {
                 当前企业还没有任何负责人数据，请先导入 Excel。
               </div>
               <label v-for="n in ownersAvailable" :key="n" class="owner-chip">
-                <input
-                  type="checkbox"
-                  :checked="form.scope_owners.includes(n)"
-                  @change="toggleScopeOwner(n)"
-                />
+                <input type="checkbox" :checked="form.scope_owners.includes(n)" @change="toggleScopeOwner(n)" />
                 <span>{{ n }}</span>
               </label>
-            </div>
-            <div class="t-muted" style="font-size:11px;margin-top:4px">
-              选择负责人时已自动勾选；可继续添加其他负责人。超级管理员永远拥有全部数据。
             </div>
           </div>
         </template>
@@ -713,62 +813,48 @@ watch(() => route.query.tenant_id, async () => {
       </header>
       <div class="modal-body">
         <div class="field" :class="{ 'has-error': deptNameErr }">
-          <label>
-            部门名称
-            <span class="req-mark" title="必填">*</span>
-          </label>
-          <input
-            v-model="deptForm.name"
-            placeholder="例如：销售一部"
-            @input="deptNameErr = ''"
-          />
+          <label>部门名称 <span class="req-mark" title="必填">*</span></label>
+          <input v-model="deptForm.name" placeholder="例如：销售一部" @input="deptNameErr = ''" />
           <div v-if="deptNameErr" class="field-error">{{ deptNameErr }}</div>
-        </div>
-
-        <div class="field" :class="{ 'has-error': deptRateErr }">
-          <label>
-            固定利润率
-            <span class="req-mark" title="必填">*</span>
-            <span class="t-muted" style="font-size:11px">公司利润率 = 经营利润率 − 此值</span>
-          </label>
-          <div class="cfg-input">
-            <input
-              type="number" min="0" max="99.99" step="0.01"
-              v-model="deptForm.rate_pct"
-              @input="deptRateErr = ''"
-            />
-            <span class="suffix">%</span>
-          </div>
-          <div v-if="deptRateErr" class="field-error">{{ deptRateErr }}</div>
         </div>
 
         <div class="field">
           <label>
             成员
-            <span class="t-muted" style="font-size:11px">（多选，超级管理员不可加入部门）</span>
+            <span class="t-muted" style="font-size:11px">（多选，一个用户可属于多个部门；超管不能加入）</span>
           </label>
-          <div class="owner-pick" style="max-height:240px">
+          <div class="owner-pick" style="max-height:200px">
             <div v-if="!assignableUsers.length" class="t-muted" style="font-size:12px">
-              当前企业暂无可分配成员（先去新增普通用户/管理员账号）。
+              当前企业暂无可分配成员。
             </div>
             <label v-for="u in assignableUsers" :key="u.id" class="owner-chip">
-              <input
-                type="checkbox"
-                :checked="deptForm.member_ids.includes(u.id)"
-                @change="toggleDeptMember(u.id)"
-              />
+              <input type="checkbox" :checked="deptForm.member_ids.includes(u.id)" @change="toggleDeptMember(u.id)" />
               <span>
                 {{ u.username }}
                 <span v-if="u.display_name" class="t-muted">· {{ u.display_name }}</span>
-                <span
-                  v-if="u.department_id && (!editingDept || u.department_id !== editingDept.id)"
-                  class="dept-from"
-                >← {{ deptLabel(u.department_id) }}</span>
               </span>
             </label>
           </div>
-          <div class="t-muted" style="font-size:11px;margin-top:4px">
-            勾选会将成员加入此部门（自动从原部门移出）；取消勾选则把成员移出部门（不会自动加到别处）。
+        </div>
+
+        <div class="field">
+          <label>
+            店铺
+            <span class="t-muted" style="font-size:11px">（部门视角下展示的店铺；一个店铺只能在一个部门视角下）</span>
+          </label>
+          <div class="owner-pick" style="max-height:200px">
+            <div v-if="!shops.length" class="t-muted" style="font-size:12px">
+              暂无店铺，请先导入数据让店铺出现。
+            </div>
+            <label v-for="s in shops" :key="s.id" class="owner-chip">
+              <input type="checkbox" :checked="deptForm.view_shop_codes.includes(s.shop_code)" @change="toggleDeptShop(s.shop_code)" />
+              <span>
+                {{ s.shop_name || s.shop_code }}
+                <span v-if="shopCurrentViewDept(s.shop_code)" class="dept-from">
+                  ← {{ shopCurrentViewDept(s.shop_code).name }}
+                </span>
+              </span>
+            </label>
           </div>
         </div>
 
@@ -777,6 +863,71 @@ watch(() => route.query.tenant_id, async () => {
       <footer class="modal-foot">
         <button class="btn" @click="deptDialogOpen = false">取消</button>
         <button class="btn primary" @click="submitDept">保存</button>
+      </footer>
+    </div>
+  </div>
+
+  <!-- =================== SHOP FEE DIALOG =================== -->
+  <div v-if="shopDialogOpen" class="modal-backdrop" @click.self="shopDialogOpen = false">
+    <div class="modal-card">
+      <header class="modal-head">
+        <span class="panel-title">{{ editingShop ? "编辑店铺费用配置" : "新增店铺费用配置" }}</span>
+        <button class="btn ghost sm" @click="shopDialogOpen = false">✕</button>
+      </header>
+      <div class="modal-body">
+        <div class="field" :class="{ 'has-error': shopFeeDeptErr }">
+          <label>费用所属部门 <span class="req-mark" title="必填">*</span></label>
+          <select class="select" v-model.number="shopForm.fee_department_id" @change="shopFeeDeptErr = ''">
+            <option :value="null" disabled>请选择部门</option>
+            <option v-for="d in departments" :key="d.id" :value="d.id">{{ d.name }}</option>
+          </select>
+          <div v-if="shopFeeDeptErr" class="field-error">{{ shopFeeDeptErr }}</div>
+        </div>
+
+        <div class="field" :class="{ 'has-error': shopShareErr }">
+          <label>人员均摊（固定费用） <span class="req-mark" title="必填">*</span></label>
+          <div class="cfg-input">
+            <input type="number" min="0" step="0.01" v-model="shopForm.per_capita_share" @input="shopShareErr = ''" />
+            <span class="suffix">元</span>
+          </div>
+          <div v-if="shopShareErr" class="field-error">{{ shopShareErr }}</div>
+        </div>
+
+        <div class="field" :class="{ 'has-error': shopTaxErr }">
+          <label>发货客服税费（百分比费用） <span class="req-mark" title="必填">*</span></label>
+          <div class="cfg-input">
+            <input type="number" min="0" max="99.99" step="0.01" v-model="shopForm.ship_service_tax_rate_pct" @input="shopTaxErr = ''" />
+            <span class="suffix">%</span>
+          </div>
+          <div v-if="shopTaxErr" class="field-error">{{ shopTaxErr }}</div>
+        </div>
+
+        <div class="field">
+          <label>
+            适用店铺 <span class="req-mark" title="必填">*</span>
+            <span class="t-muted" style="font-size:11px">（多选；一个店铺只能属于一个费用配置）</span>
+          </label>
+          <div class="owner-pick" style="max-height:240px">
+            <div v-if="!shops.length" class="t-muted" style="font-size:12px">
+              暂无店铺。
+            </div>
+            <label v-for="s in shops" :key="s.id" class="owner-chip">
+              <input type="checkbox" :checked="shopForm.shop_codes.includes(s.shop_code)" @change="toggleShopFormCode(s.shop_code)" />
+              <span>
+                {{ s.shop_name || s.shop_code }}
+                <span v-if="shopCurrentFeeDept(s.shop_code)" class="dept-from">
+                  ← {{ shopCurrentFeeDept(s.shop_code).name }}
+                </span>
+              </span>
+            </label>
+          </div>
+        </div>
+
+        <div class="error">{{ shopFormError }}</div>
+      </div>
+      <footer class="modal-foot">
+        <button class="btn" @click="shopDialogOpen = false">取消</button>
+        <button class="btn primary" @click="submitShop">保存</button>
       </footer>
     </div>
   </div>
@@ -795,9 +946,8 @@ watch(() => route.query.tenant_id, async () => {
 .field input:disabled { background: var(--bg-elev); color: var(--ink-4); cursor: not-allowed; }
 
 .req-mark { color: var(--neg); font-weight: 600; margin-left: 2px; }
-.field-error { font-size: 12px; color: var(--neg); font-family: var(--font-sans); }
-.field.has-error input,
-.field.has-error select {
+.field-error { font-size: 12px; color: var(--neg); }
+.field.has-error input, .field.has-error select {
   border-color: var(--neg);
   box-shadow: 0 0 0 3px oklch(56% 0.16 30 / 0.12);
 }
@@ -807,7 +957,7 @@ watch(() => route.query.tenant_id, async () => {
   display: grid; place-items: center; z-index: 80; backdrop-filter: blur(4px);
 }
 .modal-card {
-  width: 520px; max-width: calc(100vw - 32px);
+  width: 560px; max-width: calc(100vw - 32px);
   background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
   box-shadow: var(--shadow-pop);
   display: flex; flex-direction: column;
@@ -823,7 +973,7 @@ watch(() => route.query.tenant_id, async () => {
 
 .cfg-input { display: flex; align-items: center; gap: 6px; }
 .cfg-input input {
-  width: 120px; padding: 8px 10px;
+  width: 140px; padding: 8px 10px;
   border: 1px solid var(--border); border-radius: 8px;
   font-family: var(--font-mono); font-size: 14px; color: var(--ink);
   background: var(--surface);
@@ -831,9 +981,7 @@ watch(() => route.query.tenant_id, async () => {
 .cfg-input input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-line); }
 .cfg-input .suffix { color: var(--ink-4); font-family: var(--font-mono); font-size: 13px; }
 
-/* Tab pills in the panel header */
-.tabs-wrap { display: inline-flex; gap: 4px; padding: 4px; background: var(--bg-elev);
-  border-radius: 10px; }
+.tabs-wrap { display: inline-flex; gap: 4px; padding: 4px; background: var(--bg-elev); border-radius: 10px; }
 .tab-pill {
   appearance: none; border: 0; background: transparent; color: var(--ink-3);
   padding: 6px 14px; font: inherit; font-size: 13px; font-weight: 500;
@@ -868,7 +1016,14 @@ watch(() => route.query.tenant_id, async () => {
 }
 .dept-from { color: var(--ink-4); font-size: 11px; margin-left: 4px; }
 
-/* Combobox */
+.more-tag {
+  display: inline-flex; align-items: center;
+  padding: 1px 7px; border-radius: 999px; margin-left: 4px;
+  background: var(--bg-elev); color: var(--ink-3);
+  font-size: 11px; font-family: var(--font-mono);
+  cursor: help;
+}
+
 .combobox { position: relative; }
 .combo-pop {
   position: absolute; left: 0; right: 0; top: calc(100% + 4px); z-index: 5;

@@ -5,15 +5,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..db import get_db
 from ..models import (
     Department, ROLE_PLATFORM_ADMIN, ROLE_TENANT_ADMIN, ROLE_TENANT_SUPER_ADMIN,
-    ROLE_TENANT_USER, SalesRecord, Tenant, User,
+    ROLE_TENANT_USER, SalesRecord, Tenant, User, UserDepartment,
 )
-from ..schemas import ApiResponse, UserCreate, UserOut, UserUpdate
+from ..schemas import ApiResponse, DepartmentBrief, UserCreate, UserOut, UserUpdate
 from ..security import hash_password, require_backend_access
 
 router = APIRouter(prefix="/api/users", tags=["users"])
 
-# Roles a non-platform actor is allowed to *assign* via create/update. The
-# super-admin role is reserved for the initial tenant account.
 ASSIGNABLE_ROLES = {ROLE_TENANT_ADMIN, ROLE_TENANT_USER}
 
 
@@ -22,25 +20,18 @@ ASSIGNABLE_ROLES = {ROLE_TENANT_ADMIN, ROLE_TENANT_USER}
 # ---------------------------------------------------------------------------
 
 def _scope_for(actor: User, explicit_tenant_id: int | None) -> int:
-    """Resolve which tenant a tenant-scoped call operates on.
-
-    - tenant_super_admin / tenant_admin: forced to their own tenant.
-    - platform_admin: must specify tenant_id (else 400).
-    """
     if actor.role == ROLE_PLATFORM_ADMIN:
         if explicit_tenant_id is None:
             raise HTTPException(status_code=400, detail="平台管理员需指定 tenant_id")
         return explicit_tenant_id
-    return actor.tenant_id  # non-null for tenant_super_admin / tenant_admin
+    return actor.tenant_id
 
 
 def _can_create(actor: User) -> bool:
-    """Only super_admin (within tenant) and platform_admin can create users."""
     return actor.role in (ROLE_PLATFORM_ADMIN, ROLE_TENANT_SUPER_ADMIN)
 
 
 def _can_delete(actor: User, target: User) -> bool:
-    """Only super_admin / platform_admin can delete, and never themselves."""
     if actor.id == target.id:
         return False
     if target.role == ROLE_PLATFORM_ADMIN:
@@ -48,8 +39,6 @@ def _can_delete(actor: User, target: User) -> bool:
     if actor.role == ROLE_PLATFORM_ADMIN:
         return True
     if actor.role == ROLE_TENANT_SUPER_ADMIN:
-        # super_admin can delete admin/user in their own tenant, never
-        # another super_admin (there should be only one anyway, but defensively).
         return (
             target.tenant_id == actor.tenant_id
             and target.role != ROLE_TENANT_SUPER_ADMIN
@@ -60,40 +49,35 @@ def _can_delete(actor: User, target: User) -> bool:
 def _can_edit(actor: User, target: User) -> tuple[bool, set[str]]:
     """Return (allowed, allowed_fields).
 
-    allowed_fields is the set of UserUpdate fields the actor may set on the
-    target. For super/platform actors that's everything; for plain admins
-    only basic fields on a tenant_user target.
+    Plain admin can now edit data_scope_owners too (per the new rule that
+    scope-editing is super + admin, not super-only).
     """
     if target.role == ROLE_PLATFORM_ADMIN:
         return False, set()
 
-    # platform_admin
     if actor.role == ROLE_PLATFORM_ADMIN:
-        return True, {"password", "display_name", "role", "data_scope_owners", "department_id"}
+        return True, {"password", "display_name", "role", "data_scope_owners", "department_ids"}
 
-    # super_admin: full control within own tenant; cannot edit ANOTHER
-    # super_admin (defensive — only one per tenant).
     if actor.role == ROLE_TENANT_SUPER_ADMIN:
         if target.tenant_id != actor.tenant_id:
             return False, set()
         if target.role == ROLE_TENANT_SUPER_ADMIN and target.id != actor.id:
             return False, set()
-        # Editing self: super may update name/password but not change own
-        # role away (otherwise tenant is left without a super), and they
-        # don't belong to a department.
         if target.id == actor.id:
+            # Editing self: super may update name/password but not own role
+            # (would orphan the tenant) and supers have no departments.
             return True, {"password", "display_name"}
-        return True, {"password", "display_name", "role", "data_scope_owners", "department_id"}
+        return True, {"password", "display_name", "role", "data_scope_owners", "department_ids"}
 
-    # plain tenant_admin: same tenant, only普通user target.
-    # Can edit basic fields + transfer between departments. Cannot touch
-    # data_scope (per product decision: scope is super-only).
     if actor.role == ROLE_TENANT_ADMIN:
+        # Plain admin: can edit普通user in own tenant + adjust departments
+        # + adjust data_scope_owners. Cannot touch password of others (per
+        # historical design — only super resets passwords).
         if target.tenant_id != actor.tenant_id:
             return False, set()
         if target.role != ROLE_TENANT_USER:
             return False, set()
-        return True, {"password", "display_name", "department_id"}
+        return True, {"display_name", "department_ids", "data_scope_owners"}
 
     return False, set()
 
@@ -106,44 +90,58 @@ def _validate_role(role: str) -> None:
         )
 
 
-async def _resolve_department(
-    db: AsyncSession, tenant_id: int, department_id: int | None, role: str,
-) -> int | None:
-    """Validate a requested department_id for create/update.
+async def _resolve_departments(
+    db: AsyncSession, tenant_id: int, department_ids: list[int] | None, role: str,
+) -> list[int]:
+    """Validate the requested department_ids for create/update.
 
-    Returns the validated id (or None if role doesn't need one). Raises
-    HTTPException for invalid combos.
+    Super-admins / platform-admins must have an empty list. Others must
+    have at least one. Every id must point at a department in the same
+    tenant.
     """
+    ids = list(department_ids or [])
     if role in (ROLE_PLATFORM_ADMIN, ROLE_TENANT_SUPER_ADMIN):
-        # These roles never belong to a department.
-        if department_id is not None:
+        if ids:
             raise HTTPException(status_code=400, detail="超级管理员不归属任何部门")
-        return None
-    # tenant_admin / tenant_user MUST have a department.
-    if department_id is None:
-        raise HTTPException(status_code=400, detail="请选择部门")
-    dept = (await db.execute(
-        select(Department).where(Department.id == department_id)
-    )).scalar_one_or_none()
-    if not dept or dept.tenant_id != tenant_id:
-        raise HTTPException(status_code=400, detail="所选部门不属于该企业")
-    return dept.id
+        return []
+    if not ids:
+        raise HTTPException(status_code=400, detail="请至少选择一个部门")
+    depts = (await db.execute(
+        select(Department).where(Department.id.in_(ids))
+    )).scalars().all()
+    if len(depts) != len(set(ids)):
+        raise HTTPException(status_code=400, detail="部分部门不存在")
+    for d in depts:
+        if d.tenant_id != tenant_id:
+            raise HTTPException(status_code=400, detail=f"部门「{d.name}」不属于该企业")
+    return list(set(ids))
+
+
+async def _user_departments(db: AsyncSession, user_id: int) -> list[DepartmentBrief]:
+    rows = (await db.execute(
+        select(Department)
+        .join(UserDepartment, UserDepartment.department_id == Department.id)
+        .where(UserDepartment.user_id == user_id)
+        .order_by(Department.id.asc())
+    )).scalars().all()
+    return [DepartmentBrief.model_validate(d) for d in rows]
+
+
+async def _set_user_departments(db: AsyncSession, user_id: int, dept_ids: list[int]) -> None:
+    """Replace the user's department links wholesale."""
+    existing = (await db.execute(
+        select(UserDepartment).where(UserDepartment.user_id == user_id)
+    )).scalars().all()
+    for link in existing:
+        await db.delete(link)
+    await db.flush()
+    for did in dept_ids:
+        db.add(UserDepartment(user_id=user_id, department_id=did))
 
 
 async def _hydrate_user(db: AsyncSession, user: User) -> UserOut:
-    """UserOut + department_name + department_fixed_profit_rate.
-
-    Pulls the user's department in one extra round-trip. The frontend uses
-    this to render the dashboard 公司利润率 without a separate request.
-    """
     out = UserOut.model_validate(user)
-    if user.department_id is not None:
-        dept = (await db.execute(
-            select(Department).where(Department.id == user.department_id)
-        )).scalar_one_or_none()
-        if dept:
-            out.department_name = dept.name
-            out.department_fixed_profit_rate = float(dept.fixed_profit_rate)
+    out.departments = await _user_departments(db, user.id)
     return out
 
 
@@ -176,19 +174,28 @@ async def list_users(
     db: AsyncSession = Depends(get_db),
 ):
     scope = _scope_for(actor, tenant_id)
-    # One query joining department for label + rate, sorted by user id.
-    rows = (await db.execute(
-        select(User, Department)
-        .outerjoin(Department, Department.id == User.department_id)
-        .where(User.tenant_id == scope)
-        .order_by(User.id.asc())
+    users = (await db.execute(
+        select(User).where(User.tenant_id == scope).order_by(User.id.asc())
+    )).scalars().all()
+    if not users:
+        return ApiResponse(data=[])
+
+    # Bulk-load all department memberships for this tenant's users in one
+    # query, then attach.
+    user_ids = [u.id for u in users]
+    link_rows = (await db.execute(
+        select(UserDepartment.user_id, Department)
+        .join(Department, Department.id == UserDepartment.department_id)
+        .where(UserDepartment.user_id.in_(user_ids))
     )).all()
+    depts_by_user: dict[int, list[DepartmentBrief]] = {uid: [] for uid in user_ids}
+    for uid, dept in link_rows:
+        depts_by_user[uid].append(DepartmentBrief.model_validate(dept))
+
     out: list[UserOut] = []
-    for user, dept in rows:
-        item = UserOut.model_validate(user)
-        if dept is not None:
-            item.department_name = dept.name
-            item.department_fixed_profit_rate = float(dept.fixed_profit_rate)
+    for u in users:
+        item = UserOut.model_validate(u)
+        item.departments = depts_by_user.get(u.id, [])
         out.append(item)
     return ApiResponse(data=out)
 
@@ -212,7 +219,7 @@ async def create_user(
     if exists:
         raise HTTPException(status_code=409, detail="用户名已存在")
 
-    dept_id = await _resolve_department(db, scope, body.department_id, body.role)
+    dept_ids = await _resolve_departments(db, scope, body.department_ids, body.role)
 
     user = User(
         tenant_id=scope,
@@ -220,11 +227,13 @@ async def create_user(
         password_hash=hash_password(body.password),
         role=body.role,
         display_name=body.display_name,
-        department_id=dept_id,
         data_scope_owners=body.data_scope_owners,
         created_by=actor.id,
     )
     db.add(user)
+    await db.flush()
+    if dept_ids:
+        await _set_user_departments(db, user.id, dept_ids)
     await db.commit()
     await db.refresh(user)
     return ApiResponse(data=await _hydrate_user(db, user))
@@ -244,7 +253,7 @@ async def update_user(
     if not allowed:
         raise HTTPException(status_code=403, detail="无权操作该用户")
 
-    sent = body.model_fields_set  # which keys the client actually sent
+    sent = body.model_fields_set
 
     if "password" in sent and body.password is not None:
         if "password" not in allowed_fields:
@@ -263,22 +272,23 @@ async def update_user(
         _validate_role(body.role)
         new_role = body.role
 
-    # Department change. Validate against the *resulting* role (post-update),
-    # since changing role to/from super affects whether dept is required.
-    if "department_id" in sent:
-        if "department_id" not in allowed_fields:
+    # Department membership — full-replace semantics. When the role is
+    # flipping to/from super, _resolve_departments enforces the right
+    # cardinality.
+    if "department_ids" in sent:
+        if "department_ids" not in allowed_fields:
             raise HTTPException(status_code=403, detail="无权调整部门归属")
-        target.department_id = await _resolve_department(
-            db, target.tenant_id, body.department_id, new_role,
-        )
+        ids = await _resolve_departments(db, target.tenant_id, body.department_ids, new_role)
+        await _set_user_departments(db, target.id, ids)
     elif new_role != target.role:
-        # Role flipped to/from super_admin without specifying department.
-        # If becoming super, force-clear department; if leaving super and
-        # currently NULL, reject.
+        # Role flipped, dept list wasn't sent: validate the existing one
+        # against the new role (and clear if becoming super).
         if new_role in (ROLE_PLATFORM_ADMIN, ROLE_TENANT_SUPER_ADMIN):
-            target.department_id = None
-        elif target.department_id is None:
-            raise HTTPException(status_code=400, detail="请选择部门")
+            await _set_user_departments(db, target.id, [])
+        else:
+            existing = await _user_departments(db, target.id)
+            if not existing:
+                raise HTTPException(status_code=400, detail="请至少选择一个部门")
 
     if new_role != target.role:
         target.role = new_role

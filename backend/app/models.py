@@ -50,11 +50,19 @@ class Tenant(Base):
 
 
 class Department(Base):
-    """A team / 部门 inside a tenant. Each department sets its own
-    `fixed_profit_rate` — the percentage points subtracted from 经营利润率
-    to derive 公司利润率. KPI computation uses *the logged-in user's*
-    department rate, so the same record can show different 公司利润率
-    depending on who is looking at it.
+    """A team / 部门 inside a tenant.
+
+    Departments now play TWO independent roles:
+      - "View" — which dashboard the user is looking at: the super-admin
+        picks a 部门视角 and the dashboard restricts to shops where
+        Shop.view_department_id == this dept.
+      - "Fee owner" — which department owns the fee config for a given
+        shop (人员均摊 + 发货客服税费). The shop's Shop.fee_department_id
+        points here.
+
+    A shop's view-department and fee-department can be different. Members
+    of a department come from the user_departments M2M table — a user can
+    belong to multiple departments.
     """
     __tablename__ = "departments"
     __table_args__ = (
@@ -67,12 +75,67 @@ class Department(Base):
         Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
     )
     name: Mapped[str] = mapped_column(String(100), nullable=False)
-    # Per-department 固定利润率. NOT NULL — every department must have one.
-    fixed_profit_rate: Mapped[Decimal] = mapped_column(
-        Numeric(6, 4), nullable=False, default=DEFAULT_FIXED_PROFIT_RATE,
-        server_default="0.13",
-    )
     created_by: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class UserDepartment(Base):
+    """M2M between users and departments — a user can belong to many.
+
+    We keep this as an explicit model (rather than a Table()) so it can
+    show up in SQLAlchemy's metadata + future timestamp columns can be
+    added without a major migration.
+    """
+    __tablename__ = "user_departments"
+
+    user_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    department_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("departments.id", ondelete="CASCADE"), primary_key=True
+    )
+
+
+class Shop(Base):
+    """A storefront inside a tenant.
+
+    Shops are auto-created from sales_record imports — admins never type
+    in a new shop. They configure two independent things per shop:
+      - view_department_id: which department's 部门视角 reveals this shop
+      - (fee_department_id, per_capita_share, ship_service_tax_rate):
+        the fee config used by the 公司利润率 formula
+
+    Formula (per-shop, then aggregated across selected shops):
+        adj_profit_s  = profit_s − per_capita_share_s − sales_s × tax_rate_s
+        公司利润率   = SUM(adj_profit_s) / SUM(sales_s)
+    """
+    __tablename__ = "shops"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "shop_code", name="uq_shop_tenant_code"),
+        Index("ix_shop_tenant", "tenant_id"),
+        Index("ix_shop_view_dept", "view_department_id"),
+        Index("ix_shop_fee_dept", "fee_department_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    shop_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    shop_name: Mapped[str | None] = mapped_column(String(200))
+    view_department_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("departments.id", ondelete="SET NULL")
+    )
+    fee_department_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("departments.id", ondelete="SET NULL")
+    )
+    per_capita_share: Mapped[Decimal] = mapped_column(
+        Numeric(18, 4), nullable=False, default=Decimal("0"), server_default="0",
+    )
+    ship_service_tax_rate: Mapped[Decimal] = mapped_column(
+        Numeric(6, 4), nullable=False, default=Decimal("0"), server_default="0",
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -91,14 +154,8 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[str] = mapped_column(String(32), nullable=False, default=ROLE_TENANT_USER)
     display_name: Mapped[str | None] = mapped_column(String(64))
-    # Department membership. NULL only for platform_admin and
-    # tenant_super_admin (they sit above the org-chart, not inside a dept).
-    # tenant_admin / tenant_user are required to belong to one — enforced at
-    # the API layer rather than via a NOT NULL constraint, because the
-    # super-admin row in the same table is also NULLable here.
-    department_id: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("departments.id", ondelete="SET NULL"), index=True
-    )
+    # Department membership lives in user_departments (M2M). The old
+    # single-valued users.department_id column is dropped by the migration.
     # Per-user data scope. Set by the tenant_super_admin via the admin panel.
     #   NULL  → unrestricted (default; super_admin & platform_admin always
     #           behave as if NULL regardless of stored value).

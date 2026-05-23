@@ -9,7 +9,7 @@ from sqlalchemy import delete, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import SessionLocal, engine
-from ..models import ImportBatch, SalesRecord
+from ..models import ImportBatch, SalesRecord, Shop
 from .excel_parser import parse_workbook
 
 log = logging.getLogger(__name__)
@@ -56,6 +56,11 @@ async def run_import(batch_id: str, file_path: str, tenant_id: int) -> None:
                 ins, upd = await _upsert(session, buffer)
                 inserted += ins
                 updated += upd
+            # Auto-sync shops table: every shop_code we just inserted/
+            # updated gets an entry (with the latest shop_name) so admins
+            # can immediately configure fees for new shops without ever
+            # typing a shop_code by hand. Defaults: no department, fees=0.
+            await _sync_shops_for_tenant(session, tenant_id)
             await session.commit()
     except Exception as exc:  # noqa: BLE001
         log.exception("Import failed: %s", exc)
@@ -130,6 +135,56 @@ async def _upsert(session: AsyncSession, rows: list[dict]) -> tuple[int, int]:
     )
     await session.execute(stmt)
     return inserted, updated
+
+
+async def _sync_shops_for_tenant(session: AsyncSession, tenant_id: int) -> None:
+    """Make sure every distinct shop_code in sales_records for this tenant
+    has a row in the shops table, with shop_name reflecting the latest one
+    seen in the imported data.
+
+    Idempotent. Cheap enough to run after every import — the join is
+    bounded by the number of distinct shop codes (small).
+    """
+    from sqlalchemy import func, select as _select  # local to avoid cycles
+
+    # Latest shop_name per shop_code (sales_records can have multiple rows
+    # per shop, sometimes with different names — pick the lexicographically
+    # max as a stable choice).
+    rows = (await session.execute(
+        _select(
+            SalesRecord.shop_code, func.max(SalesRecord.shop_name).label("shop_name"),
+        )
+        .where(
+            SalesRecord.tenant_id == tenant_id,
+            SalesRecord.shop_code.isnot(None),
+            SalesRecord.shop_code != "",
+        )
+        .group_by(SalesRecord.shop_code)
+    )).all()
+
+    if not rows:
+        return
+
+    existing = (await session.execute(
+        _select(Shop).where(Shop.tenant_id == tenant_id)
+    )).scalars().all()
+    by_code = {s.shop_code: s for s in existing}
+
+    for shop_code, shop_name in rows:
+        s = by_code.get(shop_code)
+        if s is None:
+            session.add(Shop(
+                tenant_id=tenant_id,
+                shop_code=shop_code,
+                shop_name=shop_name,
+            ))
+        else:
+            # Refresh the cached name (admin can override later if they
+            # don't want to track Excel renames — but defaulting to "last
+            # seen" matches user expectation).
+            if shop_name and s.shop_name != shop_name:
+                s.shop_name = shop_name
+    await session.flush()
 
 
 async def rollback_batch(session: AsyncSession, batch_id: str, tenant_id: int) -> int:

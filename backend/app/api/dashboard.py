@@ -19,9 +19,6 @@ def _tenant_for(user: User) -> int:
 
 
 def _parse_csv(value: str | None) -> list[str] | None:
-    """Parse the picker's comma-separated value into a list, or None for
-    "全部" / empty. The sentinel "all" (legacy) is treated as None too.
-    """
     if value is None:
         return None
     v = value.strip()
@@ -40,10 +37,8 @@ def _common(
     shop_code: str = Query("all", description="店铺 code，多个以逗号分隔；'all' 表示全部"),
     owner: str = Query("all", description="负责人，多个以逗号分隔；'all' 表示全部"),
     category: str = Query("all", description="类目，多个以逗号分隔；'all' 表示全部"),
-    subtract_fixed: bool = Query(True, description="公司利润率是否减去固定利润率"),
     view_department_id: int | None = Query(
-        None,
-        description="超级管理员: 以哪个部门视角查看 (用于解算 公司利润率)",
+        None, description="部门视角 — 限定为该部门下的店铺",
     ),
 ):
     return {
@@ -53,7 +48,6 @@ def _common(
         "shop_codes": _parse_csv(shop_code),
         "owners": _parse_csv(owner),
         "categories": _parse_csv(category),
-        "subtract_fixed": subtract_fixed,
         "view_department_id": view_department_id,
     }
 
@@ -65,12 +59,10 @@ async def kpi(
     db: AsyncSession = Depends(get_db),
 ):
     tid = _tenant_for(user)
-    view_dept = params.pop("view_department_id", None)
-    rate, has_rate = await svc.resolve_fixed_rate(db, user, view_dept)
     data = await svc.get_kpis(
         db, tenant_id=tid,
         scope_owners=svc.effective_scope_owners(user),
-        fixed_profit_rate=rate, has_fixed_rate=has_rate,
+        user=user,
         **params,
     )
     return ApiResponse(data=data)
@@ -84,12 +76,10 @@ async def trend(
     db: AsyncSession = Depends(get_db),
 ):
     tid = _tenant_for(user)
-    view_dept = params.pop("view_department_id", None)
-    rate, has_rate = await svc.resolve_fixed_rate(db, user, view_dept)
     data = await svc.get_trend(
         db, tenant_id=tid, metric=metric,
         scope_owners=svc.effective_scope_owners(user),
-        fixed_profit_rate=rate, has_fixed_rate=has_rate,
+        user=user,
         **params,
     )
     return ApiResponse(data=data)
@@ -102,19 +92,17 @@ async def category(
     shop_code: str = Query("all"),
     owner: str = Query("all"),
     category: str = Query("all"),
-    subtract_fixed: bool = Query(True),
     view_department_id: int | None = Query(None),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     tid = _tenant_for(user)
-    rate, has_rate = await svc.resolve_fixed_rate(db, user, view_department_id)
     data = await svc.get_category_breakdown(
         db, tid, start_date, end_date,
         _parse_csv(shop_code), _parse_csv(owner), _parse_csv(category),
-        subtract_fixed=subtract_fixed,
         scope_owners=svc.effective_scope_owners(user),
-        fixed_profit_rate=rate, has_fixed_rate=has_rate,
+        view_department_id=view_department_id,
+        user=user,
     )
     return ApiResponse(data=data)
 

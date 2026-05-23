@@ -19,8 +19,11 @@ async function onViewDept(v) {
 // ---------------------------------------------------------------------------
 // Build option lists. Shops use {code, name}; owners + categories are flat
 // strings. Empty store selection = 全部 (the filter is off).
+// Shop options restricted by 部门视角 — when a department is selected the
+// dropdown only lists that department's view-shops. availableShops is the
+// store getter that does this filtering.
 const shopOptions = computed(() =>
-  (store.filters.shops || []).map((s) => ({ value: s.code, label: s.name || s.code }))
+  (store.availableShops || []).map((s) => ({ value: s.code, label: s.name || s.code }))
 );
 const ownerOptions = computed(() =>
   (store.filters.owners || []).map((n) => ({ value: n, label: n }))
@@ -223,7 +226,22 @@ async function onYearEnd(v) {
       >{{ l }}</button>
     </div>
 
-    <!-- Order: 负责人 → 店铺 → 类目, all multi-select -->
+    <!-- Order: 部门视角 → 负责人 → 店铺 → 类目. 部门视角 limits which
+         shops appear in the 店铺 dropdown (their view_shops only). -->
+    <div v-if="showDeptViewPicker" class="filter-group">
+      <span class="filter-label" title="选择部门视角后，看板只展示该部门下的店铺数据">部门视角</span>
+      <select
+        class="select"
+        :value="store.viewDepartmentId == null ? '' : store.viewDepartmentId"
+        @change="onViewDept($event.target.value)"
+      >
+        <option value="">不指定</option>
+        <option
+          v-for="d in store.departmentOptions" :key="d.id" :value="d.id"
+        >{{ d.name }}</option>
+      </select>
+    </div>
+
     <div class="filter-group ms-wrap">
       <span class="filter-label">负责人</span>
       <button
@@ -306,21 +324,6 @@ async function onYearEnd(v) {
         </button>
         <div v-if="!categoryOptions.length" class="ms-empty">暂无可选项</div>
       </div>
-    </div>
-
-    <!-- Super-admin: pick which department's 固定利润率 to apply to 公司利润率 -->
-    <div v-if="showDeptViewPicker" class="filter-group">
-      <span class="filter-label" title="选择以哪个部门视角查看公司利润率（影响 固定利润率 的取值）">部门视角</span>
-      <select
-        class="select"
-        :value="store.viewDepartmentId == null ? '' : store.viewDepartmentId"
-        @change="onViewDept($event.target.value)"
-      >
-        <option value="">不指定（公司利润率 = 经营利润率）</option>
-        <option
-          v-for="d in store.departmentOptions" :key="d.id" :value="d.id"
-        >{{ d.name }} · {{ (Number(d.fixed_profit_rate) * 100).toFixed(2).replace(/\.?0+$/, "") }}%</option>
-      </select>
     </div>
 
     <div class="spacer-x" />
