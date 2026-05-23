@@ -6,6 +6,7 @@ import {
   GridComponent, TooltipComponent, MarkLineComponent, DataZoomComponent,
 } from "echarts/components";
 import { CanvasRenderer } from "echarts/renderers";
+import { formatCurrency } from "../utils/format";
 
 echarts.use([
   LineChart, GridComponent, TooltipComponent, MarkLineComponent,
@@ -21,11 +22,29 @@ const props = defineProps({
 const el = ref(null);
 let chart = null;
 
+// Tooltip values use the same currency formatter as everywhere else, so
+// ≥10万 collapses to "X.XX万" and the tooltip stays compact.
 function fmt(v) {
   if (v === null || v === undefined) return "—";
   if (props.format === "percent") return Number(v).toFixed(2) + "%";
   if (props.format === "int") return Math.round(Number(v)).toLocaleString("en-US");
-  return Number(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return formatCurrency(v);
+}
+
+// Y-axis labels need to be short. Currency: use 万 abbreviation for ≥10万,
+// and a "Xk" abbreviation for the band between 1k and 10万 (avoids a
+// 99,999 label that wastes axis width).
+function yAxisLabel(v) {
+  if (props.format === "percent") return v.toFixed(0) + "%";
+  if (props.format === "int") {
+    if (Math.abs(v) >= 100000) return (v / 10000).toFixed(v % 10000 === 0 ? 0 : 2) + "万";
+    if (Math.abs(v) >= 1000) return (v / 1000).toFixed(v % 1000 === 0 ? 0 : 1) + "k";
+    return String(v);
+  }
+  // currency
+  if (Math.abs(v) >= 100000) return (v / 10000).toFixed(v % 10000 === 0 ? 0 : 2) + "万";
+  if (Math.abs(v) >= 1000) return (v / 1000).toFixed(v % 1000 === 0 ? 0 : 1) + "k";
+  return String(v);
 }
 
 const option = computed(() => ({
@@ -48,11 +67,7 @@ const option = computed(() => ({
     splitLine: { lineStyle: { color: "#EFEDE6", type: "dashed" } },
     axisLabel: {
       color: "#97968B", fontFamily: "JetBrains Mono, monospace", fontSize: 11,
-      formatter: (v) => {
-        if (props.format === "percent") return v.toFixed(0) + "%";
-        if (Math.abs(v) >= 1000) return (v / 1000).toFixed(v % 1000 === 0 ? 0 : 1) + "k";
-        return v;
-      },
+      formatter: yAxisLabel,
     },
   },
   tooltip: {

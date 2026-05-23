@@ -1,8 +1,23 @@
+// Amounts at or beyond this threshold collapse to a "X.XX万" abbreviation
+// so the dashboard stays readable when sales/profit numbers run into the
+// millions. Sign is preserved (a -123,456 becomes "-12.35万"). Below the
+// threshold we keep the full precise number with thousands separators.
+const WAN = 10000;
+const WAN_THRESHOLD = 10 * WAN; // 100,000 = 10万
+
+export function formatCurrency(v) {
+  if (v === null || v === undefined || Number.isNaN(v)) return "—";
+  const n = Number(v);
+  if (Math.abs(n) >= WAN_THRESHOLD) {
+    const sign = n < 0 ? "-" : "";
+    return `${sign}${(Math.abs(n) / WAN).toFixed(2)}万`;
+  }
+  return n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
 export function formatValue(v, fmt) {
   if (v === null || v === undefined || Number.isNaN(v)) return "—";
-  if (fmt === "currency") {
-    return Number(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  }
+  if (fmt === "currency") return formatCurrency(v);
   if (fmt === "percent") {
     return Number(v).toFixed(2) + "%";
   }
