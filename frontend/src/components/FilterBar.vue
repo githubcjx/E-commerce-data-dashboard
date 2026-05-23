@@ -7,9 +7,12 @@ const store = useDashboardStore();
 const userStore = useUserStore();
 const emit = defineEmits(["reset"]);
 
-// Super-admin only — let them switch which department's 固定利润率 the
-// 公司利润率 metric uses. Plain users implicitly use their own department.
-const showDeptViewPicker = computed(() => userStore.isTenantSuperAdmin);
+// Visible to any tenant admin tier (super or plain admin) — they all
+// need to switch which department's 部门视角 limits the dashboard. Plain
+// 普通用户 don't get this picker.
+const showDeptViewPicker = computed(
+  () => userStore.isTenantSuperAdmin || userStore.isTenantPlainAdmin,
+);
 async function onViewDept(v) {
   await store.setViewDepartmentId(v === "" ? null : v);
 }

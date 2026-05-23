@@ -7,9 +7,11 @@ import TrendPanel from "../components/TrendPanel.vue";
 import CategoryTable from "../components/CategoryTable.vue";
 import { useDashboardStore } from "../stores/dashboard";
 import { useUiStore } from "../stores/ui";
+import { useUserStore } from "../stores/user";
 
 const store = useDashboardStore();
 const ui = useUiStore();
+const userStore = useUserStore();
 
 const metricDefs = computed(() => store.kpiItems.map((it) => ({ key: it.key, label: it.label, format: it.format })));
 const trendPoints = computed(() => store.trendPoints || []);
@@ -49,10 +51,11 @@ function onReset() {
 }
 
 onMounted(async () => {
-  // loadDepartments populates the 部门视角 picker (super-admin) and gives
-  // plain users a labels table for free. loadFilters / loadLayout are
-  // independent and run in parallel.
-  await Promise.all([store.loadFilters(), store.loadLayout(), store.loadDepartments()]);
+  // loadDepartments populates the 部门视角 picker. Only admin-tier roles
+  // see / need it; tenant_user's call would 403 (noisy log + wasted RTT).
+  const tasks = [store.loadFilters(), store.loadLayout()];
+  if (userStore.isAdmin) tasks.push(store.loadDepartments());
+  await Promise.all(tasks);
   await store.loadAll();
 });
 
