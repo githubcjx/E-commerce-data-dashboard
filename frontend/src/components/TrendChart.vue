@@ -31,24 +31,21 @@ function fmt(v) {
   return formatCurrency(v);
 }
 
-// Y-axis labels need to be short. Currency: use 万 abbreviation for ≥10万,
-// and a "Xk" abbreviation for the band between 1k and 10万 (avoids a
-// 99,999 label that wastes axis width).
+// Y-axis labels: show the full number with thousands separators so values
+// match exactly what the KPI cards and tooltip display. (Wider labels —
+// we widen the grid's left padding below to compensate.)
 function yAxisLabel(v) {
   if (props.format === "percent") return v.toFixed(0) + "%";
-  if (props.format === "int") {
-    if (Math.abs(v) >= 100000) return (v / 10000).toFixed(v % 10000 === 0 ? 0 : 2) + "万";
-    if (Math.abs(v) >= 1000) return (v / 1000).toFixed(v % 1000 === 0 ? 0 : 1) + "k";
-    return String(v);
-  }
-  // currency
-  if (Math.abs(v) >= 100000) return (v / 10000).toFixed(v % 10000 === 0 ? 0 : 2) + "万";
-  if (Math.abs(v) >= 1000) return (v / 1000).toFixed(v % 1000 === 0 ? 0 : 1) + "k";
-  return String(v);
+  if (props.format === "int") return Math.round(v).toLocaleString("en-US");
+  return Number(v).toLocaleString("en-US", {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 0,
+  });
 }
 
 const option = computed(() => ({
-  grid: { left: 56, right: 24, top: 16, bottom: 56 },
+  // Wider left padding to fit full numeric Y-axis labels (e.g. "1,234,567").
+  grid: { left: 80, right: 24, top: 16, bottom: 56 },
   xAxis: {
     type: "category",
     data: props.points.map((p) => p.date),
