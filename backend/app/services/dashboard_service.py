@@ -35,13 +35,15 @@ from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import (
-    Department, ROLE_PLATFORM_ADMIN, ROLE_TENANT_SUPER_ADMIN, SalesRecord,
-    Shop, User,
+    Department, ROLE_PLATFORM_ADMIN, ROLE_TENANT_ADMIN, ROLE_TENANT_SUPER_ADMIN,
+    ROLE_TENANT_USER, SalesRecord, Shop, User,
 )
 
 
 def effective_scope_owners(user: User) -> list[str] | None:
-    if user.role in (ROLE_PLATFORM_ADMIN, ROLE_TENANT_SUPER_ADMIN):
+    """All admin tiers see the full dataset; only tenant_user is restricted
+    by their data_scope_owners list."""
+    if user.role != ROLE_TENANT_USER:
         return None
     return user.data_scope_owners
 

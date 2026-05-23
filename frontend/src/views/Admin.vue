@@ -177,6 +177,9 @@ const form = ref({
   department_ids: [],
   scope_mode: "all",
   scope_owners: [],
+  // Only meaningful when role === tenant_admin. Hidden from the form
+  // otherwise. Editable only by super.
+  can_manage_scope: false,
 });
 const formError = ref("");
 const usernameErr = ref("");
@@ -204,6 +207,7 @@ function openCreate() {
     username: "", password: "", role: ROLE_TENANT_USER, display_name: "",
     department_ids: departments.value[0] ? [departments.value[0].id] : [],
     scope_mode: "all", scope_owners: [],
+    can_manage_scope: false,
   };
   resetErrors();
   ownerComboOpen.value = false;
@@ -218,6 +222,7 @@ function openEdit(u) {
     department_ids: (u.departments || []).map((d) => d.id),
     scope_mode: mode,
     scope_owners: Array.isArray(u.data_scope_owners) ? u.data_scope_owners.slice() : [],
+    can_manage_scope: !!u.can_manage_scope,
   };
   resetErrors();
   ownerComboOpen.value = false;
@@ -228,6 +233,30 @@ function openEdit(u) {
 const dialogAllowsPrivileged = computed(() => {
   if (!editing.value) return canCreate.value;
   return canEditPrivileged(editing.value);
+});
+
+// Whether the data_scope_owners picker is visible in the current dialog:
+//  - Super / platform: always visible when the form has privileged controls
+//  - Plain admin: only when editing a tenant_user AND their own
+//    can_manage_scope flag is on
+//  - The field is hidden for super-admin targets (they're never restricted)
+const showScopeField = computed(() => {
+  if (!dialogOpen.value) return false;
+  // The field controls data_scope_owners which only applies to tenant_user.
+  const targetRole = editing.value ? editing.value.role : form.value.role;
+  if (targetRole !== ROLE_TENANT_USER) return false;
+  if (userStore.isPlatformAdmin || userStore.isTenantSuperAdmin) return true;
+  if (userStore.isTenantPlainAdmin) return !!userStore.user?.can_manage_scope;
+  return false;
+});
+
+// Whether to show the "can_manage_scope" toggle on this form. Only when
+// editing/creating a tenant_admin target AND the actor is super-class.
+const canToggleManageScope = computed(() => {
+  if (!dialogOpen.value) return false;
+  const targetRole = editing.value ? editing.value.role : form.value.role;
+  if (targetRole !== ROLE_TENANT_ADMIN) return false;
+  return dialogAllowsPrivileged.value;
 });
 
 const departmentRequired = computed(() => {
@@ -311,11 +340,21 @@ async function submit() {
       }
       if (dialogAllowsPrivileged.value) {
         if (form.value.role !== editing.value.role) body.role = form.value.role;
+      }
+      // Data-scope edit: super always allowed; plain admin only when their
+      // own can_manage_scope flag is set. Show-and-send under the same
+      // gate as the field's visibility (see showScopeField).
+      if (showScopeField.value) {
         const newScope = form.value.scope_mode === "all" ? null : form.value.scope_owners.slice();
         const oldScope = editing.value.data_scope_owners ?? null;
         if (JSON.stringify(newScope) !== JSON.stringify(oldScope)) {
           body.data_scope_owners = newScope;
         }
+      }
+      // can_manage_scope toggle — super-only field.
+      if (dialogAllowsPrivileged.value && form.value.role === ROLE_TENANT_ADMIN
+          && !!form.value.can_manage_scope !== !!editing.value.can_manage_scope) {
+        body.can_manage_scope = !!form.value.can_manage_scope;
       }
       // Department membership — send when differing.
       const newDepts = form.value.department_ids.slice().sort();
@@ -334,6 +373,9 @@ async function submit() {
         department_ids: form.value.department_ids.slice(),
         data_scope_owners: form.value.scope_mode === "all" ? null : form.value.scope_owners.slice(),
       };
+      if (form.value.role === ROLE_TENANT_ADMIN) {
+        body.can_manage_scope = !!form.value.can_manage_scope;
+      }
       if (userStore.isPlatformAdmin) body.tenant_id = targetTenantId.value;
       await createUser(body);
       ui.showToast("已新增", "success");
@@ -644,6 +686,11 @@ watch(() => route.query.tenant_id, async () => {
           <td style="text-align:left">{{ u.display_name || '—' }}</td>
           <td style="text-align:left">
             <span :class="roleTagClass(u.role)">{{ roleLabel(u.role) }}</span>
+            <span
+              v-if="u.role === 'tenant_admin' && u.can_manage_scope"
+              class="tag" style="margin-left:6px"
+              title="超级管理员已授权该管理员修改普通用户的数据查看范围"
+            >可改数据范围</span>
           </td>
           <td style="text-align:left" :class="(u.departments || []).length ? '' : 't-muted'">
             <template v-if="(u.departments || []).length">{{ u.departments.map((d) => d.name).join(' / ') }}</template>
@@ -823,28 +870,44 @@ watch(() => route.query.tenant_id, async () => {
               <option value="tenant_admin">管理员</option>
             </select>
           </div>
-
-          <div class="field">
-            <label>数据查看范围</label>
-            <div class="scope-mode">
-              <label class="scope-radio">
-                <input type="radio" value="all" v-model="form.scope_mode" />全部数据
-              </label>
-              <label class="scope-radio">
-                <input type="radio" value="selected" v-model="form.scope_mode" />指定负责人
-              </label>
-            </div>
-            <div v-if="form.scope_mode === 'selected'" class="owner-pick">
-              <div v-if="!ownersAvailable.length" class="t-muted" style="font-size:12px">
-                当前企业还没有任何负责人数据，请先导入 Excel。
-              </div>
-              <label v-for="n in ownersAvailable" :key="n" class="owner-chip">
-                <input type="checkbox" :checked="form.scope_owners.includes(n)" @change="toggleScopeOwner(n)" />
-                <span>{{ n }}</span>
-              </label>
-            </div>
-          </div>
         </template>
+
+        <!-- Scope picker — only applies to tenant_user; super always sees
+             it, plain admin only when their own permission flag is on. -->
+        <div v-if="showScopeField" class="field">
+          <label>数据查看范围</label>
+          <div class="scope-mode">
+            <label class="scope-radio">
+              <input type="radio" value="all" v-model="form.scope_mode" />全部数据
+            </label>
+            <label class="scope-radio">
+              <input type="radio" value="selected" v-model="form.scope_mode" />指定负责人
+            </label>
+          </div>
+          <div v-if="form.scope_mode === 'selected'" class="owner-pick">
+            <div v-if="!ownersAvailable.length" class="t-muted" style="font-size:12px">
+              当前企业还没有任何负责人数据，请先导入 Excel。
+            </div>
+            <label v-for="n in ownersAvailable" :key="n" class="owner-chip">
+              <input type="checkbox" :checked="form.scope_owners.includes(n)" @change="toggleScopeOwner(n)" />
+              <span>{{ n }}</span>
+            </label>
+          </div>
+        </div>
+
+        <!-- Super-admin-only switch: grant this admin the right to edit
+             普通用户's data_scope_owners. Hidden for non-admin targets
+             and for non-super actors. -->
+        <div v-if="canToggleManageScope" class="field">
+          <label>数据查看范围操作权限</label>
+          <label class="perm-toggle">
+            <input type="checkbox" v-model="form.can_manage_scope" />
+            <span>允许该管理员修改普通用户的数据查看范围</span>
+          </label>
+          <div class="t-muted" style="font-size:11px;margin-top:4px">
+            关闭后，该管理员在用户管理中只能改普通用户的显示名 / 部门，不能改数据查看范围。
+          </div>
+        </div>
 
         <div class="error">{{ formError }}</div>
       </div>
@@ -1052,6 +1115,12 @@ watch(() => route.query.tenant_id, async () => {
   font-size: 13px; font-weight: 500; color: var(--ink-2); cursor: pointer;
 }
 .scope-radio input { width: auto; padding: 0; }
+
+.perm-toggle {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 6px 0; font-size: 13px; color: var(--ink-2); cursor: pointer;
+}
+.perm-toggle input { width: auto; padding: 0; margin: 0; }
 .owner-pick {
   display: flex; flex-wrap: wrap; gap: 6px;
   padding: 10px; margin-top: 4px;

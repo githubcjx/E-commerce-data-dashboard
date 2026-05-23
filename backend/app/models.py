@@ -2,8 +2,8 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from sqlalchemy import (
-    BigInteger, Date, DateTime, ForeignKey, Index, Integer, JSON, Numeric, String, Text,
-    UniqueConstraint, func,
+    BigInteger, Boolean, Date, DateTime, ForeignKey, Index, Integer, JSON, Numeric,
+    String, Text, UniqueConstraint, func,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -156,13 +156,21 @@ class User(Base):
     display_name: Mapped[str | None] = mapped_column(String(64))
     # Department membership lives in user_departments (M2M). The old
     # single-valued users.department_id column is dropped by the migration.
-    # Per-user data scope. Set by the tenant_super_admin via the admin panel.
-    #   NULL  → unrestricted (default; super_admin & platform_admin always
+    # Per-user data scope. Set by super_admin (or by a tenant_admin whose
+    # can_manage_scope flag is true) via the admin panel.
+    #   NULL  → unrestricted (default; admin tiers and platform_admin always
     #           behave as if NULL regardless of stored value).
     #   []    → user sees no rows (deliberately scoped to nothing).
     #   [...] → WHERE sales_records.owner IN (this list).
     # JSON, not JSONB, because we need the same type to work under SQLite too.
     data_scope_owners: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    # Tenant_admin permission switch: when true, this admin may edit the
+    # data_scope_owners of 普通用户 in their tenant. Toggled by the
+    # tenant_super_admin. Always false for tenant_user, ignored for
+    # super_admin / platform_admin (they have full power anyway).
+    can_manage_scope: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0",
+    )
     created_by: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

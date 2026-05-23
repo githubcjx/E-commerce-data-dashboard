@@ -49,14 +49,19 @@ def _can_delete(actor: User, target: User) -> bool:
 def _can_edit(actor: User, target: User) -> tuple[bool, set[str]]:
     """Return (allowed, allowed_fields).
 
-    Plain admin can now edit data_scope_owners too (per the new rule that
-    scope-editing is super + admin, not super-only).
+    - super_admin / platform_admin: full power; ALSO the only ones who can
+      toggle `can_manage_scope` on an admin target.
+    - tenant_admin: limited to 普通用户 in own tenant; can edit
+      data_scope_owners IFF their own `can_manage_scope` flag is true.
     """
     if target.role == ROLE_PLATFORM_ADMIN:
         return False, set()
 
     if actor.role == ROLE_PLATFORM_ADMIN:
-        return True, {"password", "display_name", "role", "data_scope_owners", "department_ids"}
+        return True, {
+            "password", "display_name", "role", "data_scope_owners",
+            "department_ids", "can_manage_scope",
+        }
 
     if actor.role == ROLE_TENANT_SUPER_ADMIN:
         if target.tenant_id != actor.tenant_id:
@@ -67,17 +72,23 @@ def _can_edit(actor: User, target: User) -> tuple[bool, set[str]]:
             # Editing self: super may update name/password but not own role
             # (would orphan the tenant) and supers have no departments.
             return True, {"password", "display_name"}
-        return True, {"password", "display_name", "role", "data_scope_owners", "department_ids"}
+        return True, {
+            "password", "display_name", "role", "data_scope_owners",
+            "department_ids", "can_manage_scope",
+        }
 
     if actor.role == ROLE_TENANT_ADMIN:
-        # Plain admin: can edit普通user in own tenant + adjust departments
-        # + adjust data_scope_owners. Cannot touch password of others (per
-        # historical design — only super resets passwords).
+        # Plain admin: can edit普通user in own tenant. Department changes
+        # are always allowed; data_scope_owners only when the actor's
+        # `can_manage_scope` flag is set by the super-admin.
         if target.tenant_id != actor.tenant_id:
             return False, set()
         if target.role != ROLE_TENANT_USER:
             return False, set()
-        return True, {"display_name", "department_ids", "data_scope_owners"}
+        fields = {"display_name", "department_ids"}
+        if bool(getattr(actor, "can_manage_scope", False)):
+            fields.add("data_scope_owners")
+        return True, fields
 
     return False, set()
 
@@ -221,6 +232,10 @@ async def create_user(
 
     dept_ids = await _resolve_departments(db, scope, body.department_ids, body.role)
 
+    # can_manage_scope only meaningful for tenant_admin; force false for
+    # tenant_user to keep the column tidy.
+    can_manage_scope = bool(body.can_manage_scope) if body.role == ROLE_TENANT_ADMIN else False
+
     user = User(
         tenant_id=scope,
         username=body.username,
@@ -228,6 +243,7 @@ async def create_user(
         role=body.role,
         display_name=body.display_name,
         data_scope_owners=body.data_scope_owners,
+        can_manage_scope=can_manage_scope,
         created_by=actor.id,
     )
     db.add(user)
@@ -297,6 +313,18 @@ async def update_user(
         if "data_scope_owners" not in allowed_fields:
             raise HTTPException(status_code=403, detail="无权修改数据范围")
         target.data_scope_owners = body.data_scope_owners
+
+    if "can_manage_scope" in sent and body.can_manage_scope is not None:
+        if "can_manage_scope" not in allowed_fields:
+            raise HTTPException(status_code=403, detail="无权调整该操作权限")
+        # Only meaningful for tenant_admin. Flipping to True on a
+        # tenant_user is silently ignored (cleared back to False).
+        target.can_manage_scope = bool(body.can_manage_scope) if target.role == ROLE_TENANT_ADMIN else False
+
+    # If the role just changed away from tenant_admin, drop the flag so
+    # the column doesn't carry stale meaning.
+    if target.role != ROLE_TENANT_ADMIN and target.can_manage_scope:
+        target.can_manage_scope = False
 
     await db.commit()
     await db.refresh(target)

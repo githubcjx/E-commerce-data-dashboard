@@ -46,9 +46,13 @@ class UserOut(BaseModel):
     # Users now belong to MANY departments (M2M). Empty list for super-admins
     # and for users who haven't been assigned yet.
     departments: list[DepartmentBrief] = []
-    # NULL means "unrestricted" (super_admin & platform_admin behave that way
+    # NULL means "unrestricted" (admin tiers + platform_admin behave that way
     # regardless of stored value). An empty list means "scoped to nothing".
     data_scope_owners: list[str] | None = None
+    # Tenant_admin scope-management switch (see model). For tenant_user it
+    # is always false. Surfaced so the frontend can hide the data-scope
+    # editor UI when an admin doesn't have the right.
+    can_manage_scope: bool = False
     created_at: datetime
 
     class Config:
@@ -103,6 +107,9 @@ class UserCreate(BaseModel):
     department_ids: list[int] = Field(default_factory=list)
     # NULL = unrestricted (default). List of owner names = scoped view.
     data_scope_owners: list[str] | None = None
+    # Only meaningful when role=tenant_admin. False by default. Setter
+    # restricted to super at the API layer.
+    can_manage_scope: bool = False
     # Only honored when actor is platform_admin (used from /admin/users?tenant_id=).
     tenant_id: int | None = None
 
@@ -116,6 +123,9 @@ class UserUpdate(BaseModel):
     # Sent as a list to set scope, or as null to clear (= unrestricted).
     # Omit the key entirely to leave scope unchanged.
     data_scope_owners: list[str] | None = None
+    # Super-only field — toggled to grant/revoke an admin's right to
+    # edit other users' data_scope_owners. Omit to leave unchanged.
+    can_manage_scope: bool | None = None
 
 
 # ---------- Departments ----------

@@ -32,6 +32,16 @@ export const useUserStore = defineStore("user", {
     // Can use the import feature. 普通用户 are hidden from it entirely;
     // platform_admin has no own tenant so they can't import either.
     canImport: (s) => s.user?.role === ROLE_TENANT_SUPER || s.user?.role === ROLE_TENANT_ADMIN,
+    // Whether the current user may edit other users' 数据查看范围.
+    //  - super_admin / platform_admin: always yes
+    //  - tenant_admin: only when their own can_manage_scope flag is on
+    //  - tenant_user: no
+    canEditDataScope: (s) => {
+      const r = s.user?.role;
+      if (r === ROLE_PLATFORM || r === ROLE_TENANT_SUPER) return true;
+      if (r === ROLE_TENANT_ADMIN) return !!s.user?.can_manage_scope;
+      return false;
+    },
   },
   actions: {
     async login(username, password) {
