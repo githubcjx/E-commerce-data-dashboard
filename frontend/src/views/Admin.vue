@@ -896,17 +896,35 @@ watch(() => route.query.tenant_id, async () => {
         </div>
 
         <!-- Super-admin-only switch: grant this admin the right to edit
-             普通用户's data_scope_owners. Hidden for non-admin targets
-             and for non-super actors. -->
+             普通用户's data_scope_owners. The wrapping label captures
+             clicks across the whole card; the on/off state is also
+             surfaced as a "已授权 / 未授权" pill so the user never has
+             to squint at a tiny native checkbox. -->
         <div v-if="canToggleManageScope" class="field">
           <label>数据查看范围操作权限</label>
-          <label class="perm-toggle">
-            <input type="checkbox" v-model="form.can_manage_scope" />
-            <span>允许该管理员修改普通用户的数据查看范围</span>
+          <label class="perm-card" :class="{ 'is-on': form.can_manage_scope }">
+            <input
+              type="checkbox"
+              :checked="form.can_manage_scope"
+              @change="form.can_manage_scope = $event.target.checked"
+            />
+            <span class="perm-box" aria-hidden="true">
+              <svg v-if="form.can_manage_scope" width="14" height="14" viewBox="0 0 14 14" fill="none">
+                <path d="M3 7L6 10L11 4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </span>
+            <span class="perm-body">
+              <span class="perm-title">
+                {{ form.can_manage_scope ? '已授权 — 可修改普通用户的数据查看范围' : '未授权 — 不能修改普通用户的数据查看范围' }}
+                <span :class="['perm-pill', form.can_manage_scope ? 'on' : 'off']">
+                  {{ form.can_manage_scope ? '开' : '关' }}
+                </span>
+              </span>
+              <span class="perm-hint">
+                关闭后，该管理员在用户管理中只能改普通用户的显示名 / 部门。
+              </span>
+            </span>
           </label>
-          <div class="t-muted" style="font-size:11px;margin-top:4px">
-            关闭后，该管理员在用户管理中只能改普通用户的显示名 / 部门，不能改数据查看范围。
-          </div>
         </div>
 
         <div class="error">{{ formError }}</div>
@@ -1116,11 +1134,49 @@ watch(() => route.query.tenant_id, async () => {
 }
 .scope-radio input { width: auto; padding: 0; }
 
-.perm-toggle {
-  display: inline-flex; align-items: center; gap: 8px;
-  padding: 6px 0; font-size: 13px; color: var(--ink-2); cursor: pointer;
+/* Card-style permission toggle — large click target, obvious on/off state */
+.perm-card {
+  display: flex; align-items: flex-start; gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border); border-radius: 10px;
+  background: var(--surface); cursor: pointer;
+  transition: border-color .15s, background .15s, box-shadow .15s;
 }
-.perm-toggle input { width: auto; padding: 0; margin: 0; }
+.perm-card:hover { border-color: var(--border-strong); }
+.perm-card.is-on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  box-shadow: 0 0 0 3px var(--accent-line);
+}
+/* Hide the native checkbox visually but keep it in the DOM for accessibility */
+.perm-card input[type="checkbox"] {
+  position: absolute; width: 1px; height: 1px;
+  padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0);
+  white-space: nowrap; border: 0;
+}
+.perm-box {
+  flex-shrink: 0; width: 22px; height: 22px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1.5px solid var(--border-strong); border-radius: 6px;
+  background: var(--surface); color: transparent;
+  transition: background .15s, border-color .15s, color .15s;
+}
+.perm-card.is-on .perm-box {
+  background: var(--accent); border-color: var(--accent); color: #fff;
+}
+.perm-body { display: flex; flex-direction: column; gap: 4px; }
+.perm-title {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13px; font-weight: 500; color: var(--ink);
+}
+.perm-card.is-on .perm-title { color: var(--accent-ink); }
+.perm-hint { font-size: 11px; color: var(--ink-4); }
+.perm-pill {
+  font-size: 10.5px; padding: 1px 8px; border-radius: 999px;
+  font-family: var(--font-mono); font-weight: 600; letter-spacing: 0.04em;
+}
+.perm-pill.on  { background: var(--accent); color: #fff; }
+.perm-pill.off { background: var(--bg-elev); color: var(--ink-4); }
 .owner-pick {
   display: flex; flex-wrap: wrap; gap: 6px;
   padding: 10px; margin-top: 4px;
