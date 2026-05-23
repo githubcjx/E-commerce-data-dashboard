@@ -19,6 +19,24 @@ const polling = ref(null);
 // Any of these → full-screen blocking overlay.
 const isBusy = computed(() => parsing.value || uploading.value || processing.value);
 
+// Batch status labels for the history list. processing / success / failed
+// come from the import job lifecycle; rolled_back is set by the rollback
+// endpoint after a successful delete so the UI keeps showing the new state
+// even after a page reload.
+function statusLabel(s) {
+  if (s === "processing") return "处理中";
+  if (s === "success") return "成功";
+  if (s === "rolled_back") return "已回滚";
+  if (s === "failed") return "失败";
+  return s || "—";
+}
+function statusTagClass(s) {
+  if (s === "success") return "success";
+  if (s === "failed") return "danger";
+  if (s === "rolled_back") return "muted";
+  return "";
+}
+
 async function handleFile(file) {
   if (!file) return;
   parsing.value = true;
@@ -159,6 +177,20 @@ onMounted(refreshHistory);
 
 <template>
   <div class="stack">
+    <!-- Overwrite rule: re-importing the same (店铺, 日期, SKU) overwrites
+         the existing row with the new data. Surface this prominently so
+         users don't worry their second import is creating duplicates -
+         the 更新 counter in the import history reflects how many rows were
+         overwritten. -->
+    <div class="import-rule-hint">
+      <span class="hint-icon">ℹ️</span>
+      <span>
+        <strong>覆盖规则：</strong>
+        同一店铺、同一日期、同一分类的订单，再次导入时会
+        <strong>用新数据覆盖旧数据</strong>，导入记录里 「更新 N」
+        即表示被覆盖的行数；不会出现重复数据。
+      </span>
+    </div>
     <div
       :class="['dropzone full', { 'is-over': isOver, 'is-disabled': isBusy }]"
       @dragover.prevent="isOver = true"
@@ -218,7 +250,7 @@ onMounted(refreshHistory);
         <span class="panel-subtitle">最近 20 条</span>
       </header>
       <ul class="upload-history-list">
-        <li v-for="h in history" :key="h.id">
+        <li v-for="h in history" :key="h.id" :class="{ 'is-rolled-back': h.status === 'rolled_back' }">
           <span class="file-icon">
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
               <path d="M3 1.5H8L11 4.5V12.5C11 12.7761 10.7761 13 10.5 13H3C2.72386 13 2.5 12.7761 2.5 12.5V2C2.5 1.72386 2.72386 1.5 3 1.5Z" stroke="currentColor" stroke-width="1.2"/>
@@ -226,17 +258,23 @@ onMounted(refreshHistory);
             </svg>
           </span>
           <span class="file-name">{{ h.filename }}</span>
-          <span :class="['tag', h.status === 'success' ? 'success' : h.status === 'failed' ? 'danger' : '']">
-            {{ h.status === "processing" ? "处理中" : h.status === "success" ? "成功" : "失败" }}
-          </span>
+          <span :class="['tag', statusTagClass(h.status)]">{{ statusLabel(h.status) }}</span>
           <span class="spacer" />
           <span class="file-meta" :title="h.error_message || ''">
-            新增 {{ h.inserted_rows }} · 更新 {{ h.updated_rows }}
-            <template v-if="h.failed_rows"> · 跳过 {{ h.failed_rows }}</template>
-            · 总 {{ h.total_rows }}
+            <template v-if="h.status === 'rolled_back'">已删除 {{ h.inserted_rows + h.updated_rows }} 行</template>
+            <template v-else>
+              新增 {{ h.inserted_rows }} · 更新 {{ h.updated_rows }}
+              <template v-if="h.failed_rows"> · 跳过 {{ h.failed_rows }}</template>
+              · 总 {{ h.total_rows }}
+            </template>
           </span>
           <span class="file-meta" style="width:160px;text-align:right">{{ new Date(h.created_at).toLocaleString("zh-CN", { hour12: false }) }}</span>
-          <button class="btn ghost sm" @click="rollback(h)" :disabled="h.status === 'processing' || isBusy">回滚</button>
+          <button
+            v-if="h.status === 'success'"
+            class="btn ghost sm" @click="rollback(h)" :disabled="isBusy"
+          >回滚</button>
+          <span v-else-if="h.status === 'rolled_back'" class="rolled-back-tag" title="该批次的数据已全部删除">— 已回滚 —</span>
+          <span v-else class="file-meta" style="width:60px;text-align:right">—</span>
         </li>
         <li v-if="!history.length" class="empty-state" style="display:block">暂无导入记录</li>
       </ul>
@@ -258,6 +296,34 @@ onMounted(refreshHistory);
 <style scoped>
 .dropzone.full { max-width: 100%; }
 .dropzone.is-disabled { opacity: 0.55; pointer-events: none; cursor: not-allowed; }
+
+/* Rolled-back batch rows: muted text + struck-through filename so the row
+   is unmistakably "this batch's data is gone now" without removing it from
+   the list (the user still wants to see audit history). */
+.upload-history-list li.is-rolled-back { opacity: 0.62; }
+.upload-history-list li.is-rolled-back .file-name { text-decoration: line-through; }
+.rolled-back-tag {
+  display: inline-flex; align-items: center;
+  padding: 4px 10px; border-radius: 999px;
+  border: 1px dashed var(--border);
+  font-size: 11px; color: var(--ink-4); white-space: nowrap;
+}
+.tag.muted {
+  background: var(--bg-elev); color: var(--ink-4);
+  border-color: var(--border);
+}
+
+/* Overwrite-rule hint above the dropzone */
+.import-rule-hint {
+  display: flex; align-items: center; gap: 8px;
+  margin: 0 0 12px;
+  padding: 10px 14px;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-line);
+  border-radius: 10px;
+  font-size: 13px; color: var(--accent-ink);
+}
+.import-rule-hint .hint-icon { font-size: 16px; flex-shrink: 0; }
 
 .loading-overlay {
   position: fixed; inset: 0; z-index: 2000;

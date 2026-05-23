@@ -133,11 +133,27 @@ async def _upsert(session: AsyncSession, rows: list[dict]) -> tuple[int, int]:
 
 
 async def rollback_batch(session: AsyncSession, batch_id: str, tenant_id: int) -> int:
-    """Delete all rows tied to a batch_id (scoped to tenant). Returns deleted count."""
+    """Delete all rows tied to a batch_id (scoped to tenant). Returns deleted count.
+
+    Also flips the batch's own status to 'rolled_back' so the UI can render
+    an unmistakable 已回滚 badge even after the page reloads — without this,
+    a rolled-back batch still looked like a successful one and the user had
+    no persistent confirmation of the operation.
+
+    Idempotent: re-rolling an already-rolled-back batch returns 0 and is a
+    no-op apart from refreshing the status.
+    """
     res = await session.execute(
         delete(SalesRecord)
         .where(SalesRecord.batch_id == batch_id)
         .where(SalesRecord.tenant_id == tenant_id)
     )
+    deleted = res.rowcount or 0
+    await session.execute(
+        update(ImportBatch)
+        .where(ImportBatch.id == batch_id)
+        .where(ImportBatch.tenant_id == tenant_id)
+        .values(status="rolled_back")
+    )
     await session.commit()
-    return res.rowcount or 0
+    return deleted

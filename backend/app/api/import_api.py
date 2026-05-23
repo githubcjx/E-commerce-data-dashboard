@@ -108,5 +108,9 @@ async def rollback(
         raise HTTPException(status_code=404, detail="批次不存在")
     if row.tenant_id != tenant_id:
         raise HTTPException(status_code=403, detail="无权回滚其他企业的批次")
+    if row.status == "rolled_back":
+        raise HTTPException(status_code=400, detail="该批次已回滚")
+    if row.status == "processing":
+        raise HTTPException(status_code=400, detail="批次仍在处理中，请稍后再回滚")
     deleted = await rollback_batch(db, batch_id, tenant_id)
     return ApiResponse(data={"deleted": deleted})
