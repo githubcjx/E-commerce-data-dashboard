@@ -4,11 +4,12 @@ Idempotent steps:
   1. CREATE TABLE user_departments (user_id, department_id) — composite PK.
   2. Migrate existing users.department_id rows into user_departments.
   3. CREATE TABLE shops (id, tenant_id, shop_code, shop_name,
-     view_department_id, fee_department_id, per_capita_share,
-     ship_service_tax_rate, ...).
+     view_department_id, fee_group_name, per_capita_share,
+     ship_service_tax_rate, ...). Also handles the upgrade path from
+     an earlier iteration that used a fee_department_id FK column.
   4. For each tenant, seed shops from distinct (shop_code, shop_name) in
-     sales_records. Both view_department_id and fee_department_id default
-     to the tenant's 临时部门 (created by the earlier migration); fees = 0.
+     sales_records. view_department_id defaults to the tenant's 临时部门;
+     fee_group_name is left blank for the admin to fill in.
   5. Drop users.department_id and departments.fixed_profit_rate columns.
 
 Run after pulling the code update:
@@ -102,6 +103,9 @@ async def main() -> None:  # noqa: C901
             print("✓ users.department_id already gone — skip M2M copy")
 
         # ---- 3. shops table ----------------------------------------------
+        # `fee_group_name` is a free-text label NOT linked to departments.
+        # Earlier iterations of this migration used `fee_department_id` (FK);
+        # the upgrade path below handles both cases.
         if dialect == "postgresql":
             exists = await conn.scalar(text(
                 "SELECT 1 FROM information_schema.tables WHERE table_name='shops'"
@@ -116,7 +120,7 @@ async def main() -> None:  # noqa: C901
                         shop_code       VARCHAR(64) NOT NULL,
                         shop_name       VARCHAR(200),
                         view_department_id INTEGER REFERENCES departments(id) ON DELETE SET NULL,
-                        fee_department_id  INTEGER REFERENCES departments(id) ON DELETE SET NULL,
+                        fee_group_name  VARCHAR(100),
                         per_capita_share      NUMERIC(18,4) NOT NULL DEFAULT 0,
                         ship_service_tax_rate NUMERIC(6,4)  NOT NULL DEFAULT 0,
                         created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -127,10 +131,26 @@ async def main() -> None:  # noqa: C901
                 ))
                 await conn.execute(text("CREATE INDEX ix_shop_tenant ON shops(tenant_id)"))
                 await conn.execute(text("CREATE INDEX ix_shop_view_dept ON shops(view_department_id)"))
-                await conn.execute(text("CREATE INDEX ix_shop_fee_dept  ON shops(fee_department_id)"))
                 print("  ✓ created")
             else:
                 print("✓ shops already present")
+                # Upgrade path: drop fee_department_id (FK), add fee_group_name.
+                has_fee_dept = await conn.scalar(text(
+                    "SELECT 1 FROM information_schema.columns "
+                    "WHERE table_name='shops' AND column_name='fee_department_id'"
+                ))
+                if has_fee_dept:
+                    print("  Dropping shops.fee_department_id (deprecated FK) ...")
+                    await conn.execute(text("ALTER TABLE shops DROP COLUMN fee_department_id"))
+                has_fee_group = await conn.scalar(text(
+                    "SELECT 1 FROM information_schema.columns "
+                    "WHERE table_name='shops' AND column_name='fee_group_name'"
+                ))
+                if not has_fee_group:
+                    print("  Adding shops.fee_group_name ...")
+                    await conn.execute(text(
+                        "ALTER TABLE shops ADD COLUMN fee_group_name VARCHAR(100)"
+                    ))
         else:  # sqlite
             row = (await conn.execute(text(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='shops'"
@@ -145,7 +165,7 @@ async def main() -> None:  # noqa: C901
                         shop_code VARCHAR(64) NOT NULL,
                         shop_name VARCHAR(200),
                         view_department_id INTEGER REFERENCES departments(id) ON DELETE SET NULL,
-                        fee_department_id  INTEGER REFERENCES departments(id) ON DELETE SET NULL,
+                        fee_group_name VARCHAR(100),
                         per_capita_share      NUMERIC(18,4) NOT NULL DEFAULT 0,
                         ship_service_tax_rate NUMERIC(6,4)  NOT NULL DEFAULT 0,
                         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -156,23 +176,34 @@ async def main() -> None:  # noqa: C901
                 ))
                 await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_shop_tenant ON shops(tenant_id)"))
                 await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_shop_view_dept ON shops(view_department_id)"))
-                await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_shop_fee_dept  ON shops(fee_department_id)"))
                 print("  ✓ created")
             else:
                 print("✓ shops already present")
+                cols = (await conn.execute(text("PRAGMA table_info(shops)"))).all()
+                names = {c[1] for c in cols}
+                if "fee_department_id" in names:
+                    print("  Dropping shops.fee_department_id (sqlite) ...")
+                    try:
+                        await conn.execute(text("ALTER TABLE shops DROP COLUMN fee_department_id"))
+                    except Exception as e:  # pragma: no cover
+                        print(f"  ⚠ could not drop: {e}")
+                if "fee_group_name" not in names:
+                    print("  Adding shops.fee_group_name (sqlite) ...")
+                    await conn.execute(text(
+                        "ALTER TABLE shops ADD COLUMN fee_group_name VARCHAR(100)"
+                    ))
 
         # ---- 4. Seed shops from sales_records ----------------------------
         # Per-tenant: distinct (shop_code, shop_name) → INSERT IF NOT EXISTS.
-        # Both view_department_id and fee_department_id default to 临时部门.
+        # view_department_id defaults to the tenant's 临时部门 so the
+        # 部门视角 picker works out of the box; fee_group_name is left
+        # blank for the admin to fill in via 店铺管理.
         tenants = (await conn.execute(text("SELECT id FROM tenants"))).all()
         seeded = 0
         for (tid,) in tenants:
-            # Find the tenant's 临时部门 (created by the prior migration).
             temp_dept = await conn.scalar(text(
                 "SELECT id FROM departments WHERE tenant_id=:tid AND name=:name"
             ), {"tid": tid, "name": TEMP_DEPT_NAME})
-            # Pick the most recent shop_name per shop_code so renames in
-            # the latest import wins.
             shops_in_data = (await conn.execute(text(
                 """
                 SELECT shop_code, MAX(shop_name) AS shop_name
@@ -182,7 +213,6 @@ async def main() -> None:  # noqa: C901
                 """
             ), {"tid": tid})).all()
             for shop_code, shop_name in shops_in_data:
-                # Insert only if not already present.
                 exists_row = await conn.scalar(text(
                     "SELECT 1 FROM shops WHERE tenant_id=:tid AND shop_code=:code"
                 ), {"tid": tid, "code": shop_code})
@@ -192,18 +222,18 @@ async def main() -> None:  # noqa: C901
                     """
                     INSERT INTO shops (
                         tenant_id, shop_code, shop_name,
-                        view_department_id, fee_department_id,
+                        view_department_id,
                         per_capita_share, ship_service_tax_rate
                     ) VALUES (
-                        :tid, :code, :name, :vdid, :fdid, 0, 0
+                        :tid, :code, :name, :vdid, 0, 0
                     )
                     """
                 ), {
                     "tid": tid, "code": shop_code, "name": shop_name,
-                    "vdid": temp_dept, "fdid": temp_dept,
+                    "vdid": temp_dept,
                 })
                 seeded += 1
-        print(f"✓ Seeded {seeded} shop(s) from sales_records (defaults: 临时部门, fees=0)")
+        print(f"✓ Seeded {seeded} shop(s) from sales_records (defaults: 视角=临时部门, fees=0)")
 
         # ---- 5. Drop deprecated columns ----------------------------------
         # users.department_id (single dept → M2M)

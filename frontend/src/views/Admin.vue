@@ -7,7 +7,7 @@ import {
 import {
   listDepartments, createDepartment, updateDepartment, deleteDepartment,
 } from "../api/departments";
-import { listShops, applyShopFeeBatch } from "../api/shops";
+import { listShops, applyShopFeeBatch, updateShop } from "../api/shops";
 import {
   useUserStore, ROLE_PLATFORM, ROLE_TENANT_SUPER, ROLE_TENANT_ADMIN, ROLE_TENANT_USER,
 } from "../stores/user";
@@ -463,30 +463,30 @@ async function removeDept(d) {
 // Shops dialog
 // ---------------------------------------------------------------------------
 const shopDialogOpen = ref(false);
-const editingShop = ref(null); // null = create-new, otherwise pre-populate
+const editingShop = ref(null);
 const shopForm = ref({
-  fee_department_id: null,
+  // Free-text label, NOT a department FK. Just for UI grouping.
+  fee_group_name: "",
   per_capita_share: "0",
-  ship_service_tax_rate_pct: "0", // pct, converted to fraction on save
+  ship_service_tax_rate_pct: "0", // pct → fraction on save
   shop_codes: [],
 });
 const shopFormError = ref("");
-const shopFeeDeptErr = ref("");
+const shopFeeGroupErr = ref("");
 const shopShareErr = ref("");
 const shopTaxErr = ref("");
 
 function resetShopErrors() {
   shopFormError.value = "";
-  shopFeeDeptErr.value = "";
+  shopFeeGroupErr.value = "";
   shopShareErr.value = "";
   shopTaxErr.value = "";
 }
 
 function openShopCreate() {
-  // "New" = a fresh fee config to apply to N shops.
   editingShop.value = null;
   shopForm.value = {
-    fee_department_id: departments.value[0]?.id || null,
+    fee_group_name: "",
     per_capita_share: "0",
     ship_service_tax_rate_pct: "0",
     shop_codes: [],
@@ -496,12 +496,9 @@ function openShopCreate() {
 }
 
 function openShopEdit(shop) {
-  // Pre-populate from one shop's current config; the multi-select starts
-  // with just that shop, but the admin can extend to apply this same
-  // config to additional shops.
   editingShop.value = shop;
   shopForm.value = {
-    fee_department_id: shop.fee_department_id,
+    fee_group_name: shop.fee_group_name || "",
     per_capita_share: String(Number(shop.per_capita_share || 0)),
     ship_service_tax_rate_pct: (Number(shop.ship_service_tax_rate || 0) * 100).toFixed(2).replace(/\.?0+$/, ""),
     shop_codes: [shop.shop_code],
@@ -516,18 +513,22 @@ function toggleShopFormCode(code) {
   if (i === -1) arr.push(code); else arr.splice(i, 1);
 }
 
-// Which fee-department currently owns this shop (for the picker hint)?
-function shopCurrentFeeDept(shopCode) {
+// Hint chip for the picker: which fee-group currently owns this shop. We
+// show this when the user is about to move it to a different group.
+function shopCurrentFeeGroup(shopCode) {
   if (!shopCode) return null;
   const s = shops.value.find((x) => x.shop_code === shopCode);
-  if (!s || !s.fee_department_id) return null;
-  if (editingShop.value && s.fee_department_id === shopForm.value.fee_department_id) return null;
-  return { id: s.fee_department_id, name: s.fee_department_name };
+  if (!s || !s.fee_group_name) return null;
+  if ((s.fee_group_name || "").trim() === (shopForm.value.fee_group_name || "").trim()) return null;
+  return s.fee_group_name;
 }
 
 function validateShopForm() {
   let ok = true;
-  if (!shopForm.value.fee_department_id) { shopFeeDeptErr.value = "请选择费用所属部门"; ok = false; }
+  const label = (shopForm.value.fee_group_name || "").trim();
+  shopForm.value.fee_group_name = label;
+  if (!label) { shopFeeGroupErr.value = "请填写费用所属部门名称"; ok = false; }
+  else if (label.length > 100) { shopFeeGroupErr.value = "名称不能超过 100 个字符"; ok = false; }
   const share = Number(shopForm.value.per_capita_share);
   if (!Number.isFinite(share) || share < 0) { shopShareErr.value = "请输入大于等于 0 的数字"; ok = false; }
   const taxPct = Number(shopForm.value.ship_service_tax_rate_pct);
@@ -545,7 +546,7 @@ async function submitShop() {
   resetShopErrors();
   if (!validateShopForm()) return;
   const body = {
-    fee_department_id: shopForm.value.fee_department_id,
+    fee_group_name: shopForm.value.fee_group_name,
     per_capita_share: Number(shopForm.value.per_capita_share),
     ship_service_tax_rate: Number(shopForm.value.ship_service_tax_rate_pct) / 100,
     shop_codes: shopForm.value.shop_codes.slice(),
@@ -557,6 +558,24 @@ async function submitShop() {
     await refreshShops();
   } catch (e) {
     shopFormError.value = e.message || "保存失败";
+  }
+}
+
+// "删除费用配置" — clear the shop's fee config (name + numbers all reset).
+// We don't actually delete the shop row (shops come from imports), just
+// the configuration on top of it.
+async function clearShopFee(shop) {
+  if (!confirm(`确认清除店铺「${shop.shop_name || shop.shop_code}」的费用配置？`)) return;
+  try {
+    await updateShop(shop.shop_code, {
+      fee_group_name: null,
+      per_capita_share: 0,
+      ship_service_tax_rate: 0,
+    }, targetTenantId.value);
+    ui.showToast("已清除", "success");
+    await refreshShops();
+  } catch (e) {
+    ui.showToast(e.message || "操作失败", "error");
   }
 }
 
@@ -688,14 +707,20 @@ watch(() => route.query.tenant_id, async () => {
       <tbody>
         <tr v-for="s in shops" :key="s.id">
           <td style="text-align:left">{{ s.shop_name || s.shop_code }}<span class="mono t-muted" style="margin-left:6px;font-size:11px">{{ s.shop_code }}</span></td>
-          <td style="text-align:left" :class="s.fee_department_name ? '' : 't-muted'">{{ s.fee_department_name || '—' }}</td>
+          <td style="text-align:left" :class="s.fee_group_name ? '' : 't-muted'">{{ s.fee_group_name || '—' }}</td>
           <td style="text-align:left" class="mono">{{ Number(s.per_capita_share || 0).toLocaleString('en-US') }}</td>
           <td style="text-align:left" class="mono">{{ (Number(s.ship_service_tax_rate || 0) * 100).toFixed(2).replace(/\.?0+$/, '') }}%</td>
           <td style="text-align:left" class="t-muted">{{ new Date(s.created_at).toLocaleString("zh-CN", { hour12: false }) }}</td>
           <td style="text-align:left" class="t-muted">{{ new Date(s.updated_at).toLocaleString("zh-CN", { hour12: false }) }}</td>
           <td>
             <button v-if="canManageShops" class="btn ghost sm" @click="openShopEdit(s)">编辑</button>
-            <span v-else class="t-muted" style="font-size:12px">—</span>
+            <button
+              v-if="canManageShops && (s.fee_group_name || Number(s.per_capita_share) || Number(s.ship_service_tax_rate))"
+              class="btn ghost sm" @click="clearShopFee(s)"
+              style="color:var(--neg)"
+              title="清除该店铺的费用配置（人员均摊归零、费率归零、所属名称清空）"
+            >删除</button>
+            <span v-if="!canManageShops" class="t-muted" style="font-size:12px">—</span>
           </td>
         </tr>
         <tr v-if="!shops.length">
@@ -875,13 +900,18 @@ watch(() => route.query.tenant_id, async () => {
         <button class="btn ghost sm" @click="shopDialogOpen = false">✕</button>
       </header>
       <div class="modal-body">
-        <div class="field" :class="{ 'has-error': shopFeeDeptErr }">
-          <label>费用所属部门 <span class="req-mark" title="必填">*</span></label>
-          <select class="select" v-model.number="shopForm.fee_department_id" @change="shopFeeDeptErr = ''">
-            <option :value="null" disabled>请选择部门</option>
-            <option v-for="d in departments" :key="d.id" :value="d.id">{{ d.name }}</option>
-          </select>
-          <div v-if="shopFeeDeptErr" class="field-error">{{ shopFeeDeptErr }}</div>
+        <div class="field" :class="{ 'has-error': shopFeeGroupErr }">
+          <label>
+            费用所属部门名称 <span class="req-mark" title="必填">*</span>
+            <span class="t-muted" style="font-size:11px">（自由填写，仅用于列表分组展示）</span>
+          </label>
+          <input
+            v-model="shopForm.fee_group_name"
+            placeholder="例如：财务一组"
+            maxlength="100"
+            @input="shopFeeGroupErr = ''"
+          />
+          <div v-if="shopFeeGroupErr" class="field-error">{{ shopFeeGroupErr }}</div>
         </div>
 
         <div class="field" :class="{ 'has-error': shopShareErr }">
@@ -915,8 +945,8 @@ watch(() => route.query.tenant_id, async () => {
               <input type="checkbox" :checked="shopForm.shop_codes.includes(s.shop_code)" @change="toggleShopFormCode(s.shop_code)" />
               <span>
                 {{ s.shop_name || s.shop_code }}
-                <span v-if="shopCurrentFeeDept(s.shop_code)" class="dept-from">
-                  ← {{ shopCurrentFeeDept(s.shop_code).name }}
+                <span v-if="shopCurrentFeeGroup(s.shop_code)" class="dept-from">
+                  ← {{ shopCurrentFeeGroup(s.shop_code) }}
                 </span>
               </span>
             </label>

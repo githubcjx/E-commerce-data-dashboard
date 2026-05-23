@@ -181,8 +181,8 @@ class ShopOut(BaseModel):
     shop_name: str | None = None
     view_department_id: int | None = None
     view_department_name: str | None = None
-    fee_department_id: int | None = None
-    fee_department_name: str | None = None
+    # Free-text fee-group label — purely cosmetic, no FK relation.
+    fee_group_name: str | None = None
     per_capita_share: float = 0.0
     ship_service_tax_rate: float = 0.0
     created_at: datetime
@@ -195,7 +195,7 @@ class ShopOut(BaseModel):
 class ShopUpdate(BaseModel):
     """PATCH /api/shops/{shop_code} — only updates non-None fields."""
     view_department_id: int | None = None
-    fee_department_id: int | None = None
+    fee_group_name: str | None = Field(default=None, max_length=100)
     per_capita_share: float | None = Field(default=None, ge=0)
     ship_service_tax_rate: float | None = Field(default=None, ge=0, lt=1)
 
@@ -203,14 +203,12 @@ class ShopUpdate(BaseModel):
 class ShopFeeBatchUpdate(BaseModel):
     """Apply one fee config to many shops at once.
 
-    Used by the 店铺管理 dialog: pick a fee_department_id + the two numeric
-    values, then assign the bundle to a multi-select of shop_codes. The
+    Used by the 店铺管理 dialog: type the 费用所属部门名称 (free-text label),
+    the two numeric values, and pick the shops to apply the bundle to. The
     selected shops have their previous fee config replaced; other shops
-    are untouched. A shop_code listed here unconditionally has its
-    fee_department_id pointed at this config, so 'one shop ↔ one fee
-    config' is enforced automatically.
+    are untouched.
     """
-    fee_department_id: int = Field(..., gt=0)
+    fee_group_name: str = Field(..., min_length=1, max_length=100)
     per_capita_share: float = Field(..., ge=0)
     ship_service_tax_rate: float = Field(..., ge=0, lt=1)
     shop_codes: list[str] = Field(default_factory=list)

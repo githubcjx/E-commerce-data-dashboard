@@ -8,8 +8,9 @@ export const updateShop = (shopCode, body, tenantId) =>
     params: tenantId ? { tenant_id: tenantId } : {},
   });
 
-// Apply (fee_department, per_capita_share, ship_service_tax_rate) to a
-// set of shop_codes in one go. Used by the 店铺管理 dialog.
+// Apply (fee_group_name, per_capita_share, ship_service_tax_rate) to a
+// set of shop_codes in one go. Used by the 店铺管理 dialog. fee_group_name
+// is a free-text label, NOT linked to the departments table.
 export const applyShopFeeBatch = (body, tenantId) =>
   client.post("/api/shops/fee-batch", body, {
     params: tenantId ? { tenant_id: tenantId } : {},

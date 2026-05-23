@@ -52,17 +52,16 @@ class Tenant(Base):
 class Department(Base):
     """A team / 部门 inside a tenant.
 
-    Departments now play TWO independent roles:
-      - "View" — which dashboard the user is looking at: the super-admin
-        picks a 部门视角 and the dashboard restricts to shops where
-        Shop.view_department_id == this dept.
-      - "Fee owner" — which department owns the fee config for a given
-        shop (人员均摊 + 发货客服税费). The shop's Shop.fee_department_id
-        points here.
+    Departments here are used purely for organisation + 部门视角:
+      - Members come from the user_departments M2M table (a user can
+        belong to multiple departments).
+      - Shops can be assigned to a department's 视角 via
+        Shop.view_department_id — the dashboard's 部门视角 picker uses
+        this to limit which shops' data shows up.
 
-    A shop's view-department and fee-department can be different. Members
-    of a department come from the user_departments M2M table — a user can
-    belong to multiple departments.
+    NOTE: the fee config (人员均摊, 发货客服税费, 费用所属部门名称) lives
+    PER-SHOP on the shops table — and the "费用所属部门名称" there is a
+    free-text label, NOT linked to this departments table in any way.
     """
     __tablename__ = "departments"
     __table_args__ = (
@@ -101,10 +100,14 @@ class Shop(Base):
     """A storefront inside a tenant.
 
     Shops are auto-created from sales_record imports — admins never type
-    in a new shop. They configure two independent things per shop:
+    in a new shop. They configure per-shop:
       - view_department_id: which department's 部门视角 reveals this shop
-      - (fee_department_id, per_capita_share, ship_service_tax_rate):
-        the fee config used by the 公司利润率 formula
+        (this IS an FK to departments — used by the 部门视角 filter)
+      - fee_group_name: a FREE-TEXT label, purely cosmetic, used to group
+        shops with the same fee config in the 店铺管理 UI. It has NO
+        relation to the departments table.
+      - per_capita_share, ship_service_tax_rate: the two fee values that
+        feed the 公司利润率 formula
 
     Formula (per-shop, then aggregated across selected shops):
         adj_profit_s  = profit_s − per_capita_share_s − sales_s × tax_rate_s
@@ -115,7 +118,6 @@ class Shop(Base):
         UniqueConstraint("tenant_id", "shop_code", name="uq_shop_tenant_code"),
         Index("ix_shop_tenant", "tenant_id"),
         Index("ix_shop_view_dept", "view_department_id"),
-        Index("ix_shop_fee_dept", "fee_department_id"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -127,9 +129,7 @@ class Shop(Base):
     view_department_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("departments.id", ondelete="SET NULL")
     )
-    fee_department_id: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("departments.id", ondelete="SET NULL")
-    )
+    fee_group_name: Mapped[str | None] = mapped_column(String(100))
     per_capita_share: Mapped[Decimal] = mapped_column(
         Numeric(18, 4), nullable=False, default=Decimal("0"), server_default="0",
     )
