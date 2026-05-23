@@ -128,7 +128,15 @@ async def _upsert(session: AsyncSession, rows: list[dict]) -> tuple[int, int]:
     inserted = len(keys) - updated
 
     stmt = dialect_insert(SalesRecord).values(rows)
-    update_cols = {c.name: c for c in stmt.excluded if c.name not in ("id", "created_at", "tenant_id")}
+    # Don't touch `batch_id` on conflict — re-importing data shouldn't
+    # transfer ownership of an existing row to the newer batch. Without
+    # this exclude, rolling back a later batch would delete rows that
+    # originally came from an earlier batch (and rolling back the
+    # earlier batch would orphan the data it was supposed to remove).
+    update_cols = {
+        c.name: c for c in stmt.excluded
+        if c.name not in ("id", "created_at", "tenant_id", "batch_id")
+    }
     stmt = stmt.on_conflict_do_update(
         index_elements=["tenant_id", "shop_code", "date", "sku"],
         set_=update_cols,
