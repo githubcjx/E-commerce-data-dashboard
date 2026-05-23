@@ -7,7 +7,9 @@ import {
 import {
   listDepartments, createDepartment, updateDepartment, deleteDepartment,
 } from "../api/departments";
-import { listShops, applyShopFeeBatch, updateShop } from "../api/shops";
+import {
+  listShops, listFeeGroups, saveFeeGroup, deleteFeeGroup,
+} from "../api/shops";
 import {
   useUserStore, ROLE_PLATFORM, ROLE_TENANT_SUPER, ROLE_TENANT_ADMIN, ROLE_TENANT_USER,
 } from "../stores/user";
@@ -114,7 +116,8 @@ function previewList(items, getLabel, n = 3) {
 // ---------------------------------------------------------------------------
 const users = ref([]);
 const departments = ref([]);
-const shops = ref([]);
+const shops = ref([]);          // every shop in the tenant (per-shop)
+const feeGroups = ref([]);      // aggregated by fee_group_name (店铺管理 list)
 const loading = ref(false);
 const ownersAvailable = ref([]);
 
@@ -141,10 +144,19 @@ async function refreshDepartments() {
 async function refreshShops() {
   if (userStore.isPlatformAdmin && !targetTenantId.value) {
     shops.value = [];
+    feeGroups.value = [];
     return;
   }
-  try { shops.value = await listShops(targetTenantId.value); }
-  catch (e) { ui.showToast(e.message || "店铺加载失败", "error"); }
+  try {
+    // Per-shop list AND aggregated fee-groups in parallel — the dialog
+    // needs the full shop list (multi-select), the table needs groups.
+    const [s, g] = await Promise.all([
+      listShops(targetTenantId.value),
+      listFeeGroups(targetTenantId.value),
+    ]);
+    shops.value = s;
+    feeGroups.value = g;
+  } catch (e) { ui.showToast(e.message || "店铺加载失败", "error"); }
 }
 
 async function loadOwners() {
@@ -460,15 +472,14 @@ async function removeDept(d) {
 }
 
 // ---------------------------------------------------------------------------
-// Shops dialog
+// Fee-group dialog (店铺管理). One row in the list = one fee group.
 // ---------------------------------------------------------------------------
 const shopDialogOpen = ref(false);
-const editingShop = ref(null);
+const editingGroup = ref(null);  // the fee-group being edited (null = create)
 const shopForm = ref({
-  // Free-text label, NOT a department FK. Just for UI grouping.
   fee_group_name: "",
   per_capita_share: "0",
-  ship_service_tax_rate_pct: "0", // pct → fraction on save
+  ship_service_tax_rate_pct: "0",
   shop_codes: [],
 });
 const shopFormError = ref("");
@@ -484,7 +495,7 @@ function resetShopErrors() {
 }
 
 function openShopCreate() {
-  editingShop.value = null;
+  editingGroup.value = null;
   shopForm.value = {
     fee_group_name: "",
     per_capita_share: "0",
@@ -495,13 +506,15 @@ function openShopCreate() {
   shopDialogOpen.value = true;
 }
 
-function openShopEdit(shop) {
-  editingShop.value = shop;
+// Edit a fee-group: pre-populate name, values, and the member shop list
+// from the group's current state.
+function openShopEdit(group) {
+  editingGroup.value = group;
   shopForm.value = {
-    fee_group_name: shop.fee_group_name || "",
-    per_capita_share: String(Number(shop.per_capita_share || 0)),
-    ship_service_tax_rate_pct: (Number(shop.ship_service_tax_rate || 0) * 100).toFixed(2).replace(/\.?0+$/, ""),
-    shop_codes: [shop.shop_code],
+    fee_group_name: group.name,
+    per_capita_share: String(Number(group.per_capita_share || 0)),
+    ship_service_tax_rate_pct: (Number(group.ship_service_tax_rate || 0) * 100).toFixed(2).replace(/\.?0+$/, ""),
+    shop_codes: (group.shops || []).map((s) => s.shop_code),
   };
   resetShopErrors();
   shopDialogOpen.value = true;
@@ -513,12 +526,15 @@ function toggleShopFormCode(code) {
   if (i === -1) arr.push(code); else arr.splice(i, 1);
 }
 
-// Hint chip for the picker: which fee-group currently owns this shop. We
-// show this when the user is about to move it to a different group.
+// Hint chip for the picker: which OTHER group currently owns this shop.
+// Hidden when the shop is in the group being edited (no conflict there).
 function shopCurrentFeeGroup(shopCode) {
   if (!shopCode) return null;
   const s = shops.value.find((x) => x.shop_code === shopCode);
   if (!s || !s.fee_group_name) return null;
+  // If this shop already belongs to the group we're editing, no warning.
+  if (editingGroup.value && s.fee_group_name === editingGroup.value.name) return null;
+  // If the input matches the existing label (same group), no warning.
   if ((s.fee_group_name || "").trim() === (shopForm.value.fee_group_name || "").trim()) return null;
   return s.fee_group_name;
 }
@@ -546,14 +562,20 @@ async function submitShop() {
   resetShopErrors();
   if (!validateShopForm()) return;
   const body = {
-    fee_group_name: shopForm.value.fee_group_name,
+    name: shopForm.value.fee_group_name,
     per_capita_share: Number(shopForm.value.per_capita_share),
     ship_service_tax_rate: Number(shopForm.value.ship_service_tax_rate_pct) / 100,
     shop_codes: shopForm.value.shop_codes.slice(),
   };
+  // On edit, pass the original name so the backend can reconcile members
+  // (shops removed from the multi-select get cleared) and accept renames.
+  if (editingGroup.value) body.original_name = editingGroup.value.name;
   try {
-    const r = await applyShopFeeBatch(body, targetTenantId.value);
-    ui.showToast(`已更新 ${r.updated} 个店铺的费用配置`, "success");
+    const r = await saveFeeGroup(body, targetTenantId.value);
+    const msg = r.removed
+      ? `已保存：${r.applied} 个店铺应用配置，${r.removed} 个店铺移出`
+      : `已保存：${r.applied} 个店铺应用配置`;
+    ui.showToast(msg, "success");
     shopDialogOpen.value = false;
     await refreshShops();
   } catch (e) {
@@ -561,21 +583,18 @@ async function submitShop() {
   }
 }
 
-// "删除费用配置" — clear the shop's fee config (name + numbers all reset).
-// We don't actually delete the shop row (shops come from imports), just
-// the configuration on top of it.
-async function clearShopFee(shop) {
-  if (!confirm(`确认清除店铺「${shop.shop_name || shop.shop_code}」的费用配置？`)) return;
+// Delete a whole fee group — clears the (name, values) bundle off every
+// shop currently in the group. The shop rows themselves stay (they come
+// from imports); they'll re-appear in the list once added to a new group.
+async function removeFeeGroup(group) {
+  const n = (group.shops || []).length;
+  if (!confirm(`确认删除「${group.name}」？将清除 ${n} 个店铺的费用配置。`)) return;
   try {
-    await updateShop(shop.shop_code, {
-      fee_group_name: null,
-      per_capita_share: 0,
-      ship_service_tax_rate: 0,
-    }, targetTenantId.value);
-    ui.showToast("已清除", "success");
+    await deleteFeeGroup(group.name, targetTenantId.value);
+    ui.showToast("已删除", "success");
     await refreshShops();
   } catch (e) {
-    ui.showToast(e.message || "操作失败", "error");
+    ui.showToast(e.message || "删除失败", "error");
   }
 }
 
@@ -692,39 +711,46 @@ watch(() => route.query.tenant_id, async () => {
     </table>
 
     <!-- ======================= SHOPS TAB ======================= -->
+    <!-- One row per fee group (= per distinct fee_group_name). Member
+         shops live behind the edit dialog. -->
     <table v-else class="tbl">
       <thead>
         <tr>
-          <th style="text-align:left">店铺</th>
           <th style="text-align:left">费用所属部门</th>
           <th style="text-align:left">固定费用（人员均摊）</th>
           <th style="text-align:left">百分比费用（发货客服税费）</th>
+          <th style="text-align:left">适用店铺数</th>
           <th style="text-align:left">创建时间</th>
           <th style="text-align:left">更新时间</th>
           <th style="text-align:right">操作</th>
         </tr>
       </thead>
       <tbody>
-        <tr v-for="s in shops" :key="s.id">
-          <td style="text-align:left">{{ s.shop_name || s.shop_code }}<span class="mono t-muted" style="margin-left:6px;font-size:11px">{{ s.shop_code }}</span></td>
-          <td style="text-align:left" :class="s.fee_group_name ? '' : 't-muted'">{{ s.fee_group_name || '—' }}</td>
-          <td style="text-align:left" class="mono">{{ Number(s.per_capita_share || 0).toLocaleString('en-US') }}</td>
-          <td style="text-align:left" class="mono">{{ (Number(s.ship_service_tax_rate || 0) * 100).toFixed(2).replace(/\.?0+$/, '') }}%</td>
-          <td style="text-align:left" class="t-muted">{{ new Date(s.created_at).toLocaleString("zh-CN", { hour12: false }) }}</td>
-          <td style="text-align:left" class="t-muted">{{ new Date(s.updated_at).toLocaleString("zh-CN", { hour12: false }) }}</td>
+        <tr v-for="g in feeGroups" :key="g.name">
+          <td style="text-align:left">{{ g.name }}</td>
+          <td style="text-align:left" class="mono">{{ Number(g.per_capita_share || 0).toLocaleString('en-US') }}</td>
+          <td style="text-align:left" class="mono">{{ (Number(g.ship_service_tax_rate || 0) * 100).toFixed(2).replace(/\.?0+$/, '') }}%</td>
+          <td style="text-align:left">
+            <span :title="(g.shops || []).map((s) => s.shop_name || s.shop_code).join('、')">
+              {{ (g.shops || []).length }} 个
+            </span>
+          </td>
+          <td style="text-align:left" class="t-muted">{{ new Date(g.created_at).toLocaleString("zh-CN", { hour12: false }) }}</td>
+          <td style="text-align:left" class="t-muted">{{ new Date(g.updated_at).toLocaleString("zh-CN", { hour12: false }) }}</td>
           <td>
-            <button v-if="canManageShops" class="btn ghost sm" @click="openShopEdit(s)">编辑</button>
+            <button v-if="canManageShops" class="btn ghost sm" @click="openShopEdit(g)">编辑</button>
             <button
-              v-if="canManageShops && (s.fee_group_name || Number(s.per_capita_share) || Number(s.ship_service_tax_rate))"
-              class="btn ghost sm" @click="clearShopFee(s)"
+              v-if="canManageShops"
+              class="btn ghost sm" @click="removeFeeGroup(g)"
               style="color:var(--neg)"
-              title="清除该店铺的费用配置（人员均摊归零、费率归零、所属名称清空）"
             >删除</button>
             <span v-if="!canManageShops" class="t-muted" style="font-size:12px">—</span>
           </td>
         </tr>
-        <tr v-if="!shops.length">
-          <td colspan="7" class="empty-state">暂无店铺（导入数据后会自动出现在这里）</td>
+        <tr v-if="!feeGroups.length">
+          <td colspan="7" class="empty-state">
+            暂无费用配置，请点击「+ 新增费用配置」开始
+          </td>
         </tr>
       </tbody>
     </table>
@@ -896,7 +922,7 @@ watch(() => route.query.tenant_id, async () => {
   <div v-if="shopDialogOpen" class="modal-backdrop" @click.self="shopDialogOpen = false">
     <div class="modal-card">
       <header class="modal-head">
-        <span class="panel-title">{{ editingShop ? "编辑店铺费用配置" : "新增店铺费用配置" }}</span>
+        <span class="panel-title">{{ editingGroup ? "编辑费用配置" : "新增费用配置" }}</span>
         <button class="btn ghost sm" @click="shopDialogOpen = false">✕</button>
       </header>
       <div class="modal-body">

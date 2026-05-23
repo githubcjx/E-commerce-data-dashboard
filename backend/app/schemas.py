@@ -200,15 +200,39 @@ class ShopUpdate(BaseModel):
     ship_service_tax_rate: float | None = Field(default=None, ge=0, lt=1)
 
 
-class ShopFeeBatchUpdate(BaseModel):
-    """Apply one fee config to many shops at once.
+class ShopFeeGroupShop(BaseModel):
+    """Single shop summary inside a fee-group row (for the list / edit form)."""
+    shop_code: str
+    shop_name: str | None = None
 
-    Used by the 店铺管理 dialog: type the 费用所属部门名称 (free-text label),
-    the two numeric values, and pick the shops to apply the bundle to. The
-    selected shops have their previous fee config replaced; other shops
-    are untouched.
+
+class ShopFeeGroupOut(BaseModel):
+    """Aggregated 费用配置 — one row per distinct fee_group_name.
+
+    Every shop tagged with the same fee_group_name shares the same values
+    (per_capita_share / ship_service_tax_rate); the save endpoint
+    enforces that on write. created_at / updated_at are min/max across
+    the member shops so the list shows when the group first appeared
+    and was last touched.
     """
-    fee_group_name: str = Field(..., min_length=1, max_length=100)
+    name: str
+    per_capita_share: float = 0.0
+    ship_service_tax_rate: float = 0.0
+    shops: list[ShopFeeGroupShop] = []
+    created_at: datetime
+    updated_at: datetime
+
+
+class ShopFeeGroupSave(BaseModel):
+    """Create-or-update a fee group.
+
+    original_name lets the edit dialog rename a group AND remove shops
+    that the user un-ticked: any shop currently tagged with
+    original_name but missing from shop_codes has its fee config
+    cleared. Omit original_name to create a fresh group.
+    """
+    original_name: str | None = Field(default=None, max_length=100)
+    name: str = Field(..., min_length=1, max_length=100)
     per_capita_share: float = Field(..., ge=0)
     ship_service_tax_rate: float = Field(..., ge=0, lt=1)
     shop_codes: list[str] = Field(default_factory=list)
