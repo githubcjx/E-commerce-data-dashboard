@@ -31,21 +31,29 @@ function fmt(v) {
   return formatCurrency(v);
 }
 
-// Y-axis labels: show the full number with thousands separators so values
-// match exactly what the KPI cards and tooltip display. (Wider labels —
-// we widen the grid's left padding below to compensate.)
+// Y-axis labels mirror the same currency rule as KPI cards/tooltip: ≥10万
+// collapses to "X.XX万", smaller values stay in full thousands-separator
+// form. Keeps axis labels compact for large-revenue tenants.
 function yAxisLabel(v) {
   if (props.format === "percent") return v.toFixed(0) + "%";
   if (props.format === "int") return Math.round(v).toLocaleString("en-US");
-  return Number(v).toLocaleString("en-US", {
+  const n = Number(v);
+  if (Math.abs(n) >= 100000) {
+    return (n / 10000).toLocaleString("en-US", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }) + "万";
+  }
+  return n.toLocaleString("en-US", {
     minimumFractionDigits: 0,
     maximumFractionDigits: 0,
   });
 }
 
 const option = computed(() => ({
-  // Wider left padding to fit full numeric Y-axis labels (e.g. "1,234,567").
-  grid: { left: 80, right: 24, top: 16, bottom: 56 },
+  // Left padding tuned for "X.XX万" style labels (≥10万 collapses); leaves
+  // a bit of headroom for occasional "1,234.56万" widths.
+  grid: { left: 64, right: 24, top: 16, bottom: 56 },
   xAxis: {
     type: "category",
     data: props.points.map((p) => p.date),

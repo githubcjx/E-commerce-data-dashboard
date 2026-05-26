@@ -41,13 +41,26 @@ function endOfMonth(d)   { return new Date(d.getFullYear(), d.getMonth() + 1, 0)
 function startOfYear(d)  { return new Date(d.getFullYear(), 0, 1); }
 function endOfYear(d)    { return new Date(d.getFullYear(), 11, 31); }
 
-// "this period" for each top-granularity. Returns ISO date strings.
-function defaultRangeFor(top) {
-  const now = new Date();
-  if (top === "week")  return [toIso(startOfWeek(now)),  toIso(endOfWeek(now))];
-  if (top === "month") return [toIso(startOfMonth(now)), toIso(endOfMonth(now))];
-  if (top === "year")  return [toIso(startOfYear(now)),  toIso(endOfYear(now))];
-  return [todayStr(), todayStr()]; // day
+// "this period" for each top-granularity, anchored on `anchor` (defaults
+// to today). Returns ISO date strings. Anchor lets us land on the latest
+// imported-data date when the user first opens the dashboard, instead of
+// silently showing an empty "today" window.
+function defaultRangeFor(top, anchor) {
+  const a = anchor instanceof Date ? anchor : new Date();
+  if (top === "week")  return [toIso(startOfWeek(a)),  toIso(endOfWeek(a))];
+  if (top === "month") return [toIso(startOfMonth(a)), toIso(endOfMonth(a))];
+  if (top === "year")  return [toIso(startOfYear(a)),  toIso(endOfYear(a))];
+  return [toIso(a), toIso(a)]; // day
+}
+
+// Parse a "YYYY-MM-DD" string as a local-time date. `new Date(str)` parses
+// it as UTC midnight, which can roll over to the previous local day for
+// negative-offset zones — avoid that by constructing explicitly.
+function parseIsoLocal(str) {
+  if (!str || typeof str !== "string") return null;
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(str);
+  if (!m) return null;
+  return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
 }
 
 // Sparklines on KPI cards just want "some" series points. We bucket
@@ -131,6 +144,17 @@ export const useDashboardStore = defineStore("dashboard", {
   actions: {
     async loadFilters() {
       try { this.filters = await fetchFilters(); } catch (_) { /* keep empty */ }
+    },
+    snapRangeToLatestData() {
+      // Re-anchor the default range on the most recent imported date
+      // (filters.date_max) instead of today, so the dashboard opens on a
+      // window that actually has data. No-op if there's no data yet — the
+      // today-based defaults from state init / loadLayout stay in place.
+      const anchor = parseIsoLocal(this.filters?.date_max);
+      if (!anchor) return;
+      const [s, e] = defaultRangeFor(this.topGranularity, anchor);
+      this.startDate = s;
+      this.endDate = e;
     },
     async loadDepartments() {
       // Super-admin's "以部门视角查看" picker needs the tenant's department

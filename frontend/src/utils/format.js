@@ -1,10 +1,17 @@
-// Always show the full precise number with thousands separators and two
-// decimal places. (We previously collapsed large amounts to "X.XX万" but
-// the precision loss made it hard to verify totals against the source
-// Excel — switched back to full numbers per user request.)
+// Amounts ≥ 10万 collapse to "X.XX万" for compactness; smaller numbers
+// show in full with thousands separators (so small totals still match
+// the source Excel exactly, while large totals don't blow out KPI card
+// widths or chart axis labels).
 export function formatCurrency(v) {
   if (v === null || v === undefined || Number.isNaN(v)) return "—";
-  return Number(v).toLocaleString("en-US", {
+  const n = Number(v);
+  if (Math.abs(n) >= 100000) {
+    return (n / 10000).toLocaleString("en-US", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }) + "万";
+  }
+  return n.toLocaleString("en-US", {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   });

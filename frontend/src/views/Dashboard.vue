@@ -56,6 +56,9 @@ onMounted(async () => {
   const tasks = [store.loadFilters(), store.loadLayout()];
   if (userStore.isAdmin) tasks.push(store.loadDepartments());
   await Promise.all(tasks);
+  // After filters load we know the latest-imported date — snap the default
+  // window to that anchor so the user lands on data, not an empty "today".
+  store.snapRangeToLatestData();
   await store.loadAll();
 });
 
