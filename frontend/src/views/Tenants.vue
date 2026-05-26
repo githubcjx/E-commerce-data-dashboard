@@ -128,7 +128,9 @@ onMounted(refresh);
     </table>
   </section>
 
-  <div v-if="dialogOpen" class="modal-backdrop" @click.self="dialogOpen = false">
+  <!-- Modal backdrop is non-dismissive: clicking outside doesn't close,
+       to avoid losing unsaved field edits. Close via ✕ / Cancel only. -->
+  <div v-if="dialogOpen" class="modal-backdrop">
     <div class="modal-card">
       <header class="modal-head">
         <span class="panel-title">{{ editing ? "编辑企业" : "新增企业 + 超级管理员" }}</span>

@@ -17,17 +17,30 @@ Trend chart:
     inside the chosen range (granularity = day | week | month | year). The
     frontend uses ECharts dataZoom to show only a window initially.
 
-公司利润率 (NEW formula):
-    Per-shop: adj_profit_s = profit_s − per_capita_share_s − sales_s × tax_rate_s
-    Aggregate: 公司利润率 = SUM(adj_profit_s) / SUM(sales_s)
+公司利润率 (per-month apportionment, replaces the old flat per-shop share):
 
-    The two values per_capita_share and tax_rate are stored on the shops
-    table; missing shops default to 0 (no deduction). This formula is
-    applied at every aggregation granularity (KPI overall, KPI sparkline
-    buckets, trend chart buckets, category breakdown).
+    For each fee group g and calendar month m:
+      monthly_amount(g, m)   — from fee_group_monthly_cost (default 0)
+      days_in_m              — calendar days in m
+      elapsed_in_window(m)   — max(0, days in (m ∩ query-range ∩ [..today]))
+      burden(g, m)           = monthly_amount / days_in_m × elapsed_in_window
+
+    Within m, that burden is split across shops in g by sales share:
+      shop_fixed_s += burden(g, m) × (sales_s_in_m / sum_sales_for_g_in_m)
+    Rule: if a fee group has 0 sales in m within the window, the burden
+    is NOT deducted (we don't redistribute to a no-sales group).
+
+    Then per shop, the existing formula:
+      adj_profit_s = profit_s − shop_fixed_s − sales_s × tax_rate_s
+      公司利润率   = SUM(adj_profit_s) / SUM(sales_s)
+
+    This applies at every granularity (KPI total, KPI sparkline bucket,
+    trend bucket, category row) by re-running the apportionment on the
+    sub-window's per-(date, shop) data.
 """
 from __future__ import annotations
 
+import calendar
 from dataclasses import dataclass
 from datetime import date, timedelta
 
@@ -35,8 +48,8 @@ from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import (
-    Department, ROLE_PLATFORM_ADMIN, ROLE_TENANT_ADMIN, ROLE_TENANT_SUPER_ADMIN,
-    ROLE_TENANT_USER, SalesRecord, Shop, User,
+    Department, FeeGroupMonthlyCost, ROLE_PLATFORM_ADMIN, ROLE_TENANT_ADMIN,
+    ROLE_TENANT_SUPER_ADMIN, ROLE_TENANT_USER, SalesRecord, Shop, User,
 )
 
 
@@ -186,20 +199,134 @@ async def validate_view_department(
     return view_dept_id
 
 
-async def shop_fees_map(
+async def shop_meta_map(
     session: AsyncSession, tenant_id: int, shop_codes: list[str] | None = None,
-) -> dict[str, tuple[float, float]]:
-    """Return {shop_code: (per_capita_share, ship_service_tax_rate)} for the
-    tenant. If shop_codes is given, limit to those shops; missing shops
-    are simply not in the map and default to (0, 0) at the call site.
+) -> dict[str, tuple[str | None, float]]:
+    """Return {shop_code: (fee_group_name or None, ship_service_tax_rate)}.
+
+    Shops missing from the map default to (None, 0.0) at the call site —
+    no fee group, no tax — i.e. no deduction from 公司利润率.
     """
     stmt = select(
-        Shop.shop_code, Shop.per_capita_share, Shop.ship_service_tax_rate,
+        Shop.shop_code, Shop.fee_group_name, Shop.ship_service_tax_rate,
     ).where(Shop.tenant_id == tenant_id)
     if shop_codes:
         stmt = stmt.where(Shop.shop_code.in_(shop_codes))
     rows = (await session.execute(stmt)).all()
-    return {code: (float(share or 0), float(tax or 0)) for code, share, tax in rows}
+    return {
+        code: ((grp or None) if (grp or "").strip() else None, float(tax or 0))
+        for code, grp, tax in rows
+    }
+
+
+async def monthly_costs_map(
+    session: AsyncSession, tenant_id: int, fee_groups: list[str] | None = None,
+) -> dict[tuple[str, str], float]:
+    """Return {(fee_group_name, "YYYY-MM"): amount} for the tenant.
+
+    Missing entries default to 0 at the call site — equivalent to "未录入
+    该月固定费用". `fee_groups`, if given, limits the query to those names
+    (the typical case: we already know which groups appear in the queried
+    shop set, no point fetching others).
+    """
+    stmt = select(
+        FeeGroupMonthlyCost.fee_group_name,
+        FeeGroupMonthlyCost.year_month,
+        FeeGroupMonthlyCost.amount,
+    ).where(FeeGroupMonthlyCost.tenant_id == tenant_id)
+    if fee_groups:
+        stmt = stmt.where(FeeGroupMonthlyCost.fee_group_name.in_(fee_groups))
+    rows = (await session.execute(stmt)).all()
+    return {(name, ym): float(amt or 0) for name, ym, amt in rows}
+
+
+# ---------------------------------------------------------------------------
+# Per-month fixed-cost apportionment
+# ---------------------------------------------------------------------------
+
+def _ym(d: date) -> str:
+    return f"{d.year:04d}-{d.month:02d}"
+
+
+def _elapsed_days_in_month(
+    year: int, month: int, sub_start: date, sub_end: date, today: date,
+) -> tuple[int, int]:
+    """(elapsed_days, days_in_month) for the (month ∩ sub_range ∩ [..today])
+    intersection. Past months in range count full days; the current month
+    counts up to today; future months count 0.
+    """
+    days_in_m = calendar.monthrange(year, month)[1]
+    m_start = date(year, month, 1)
+    m_end = date(year, month, days_in_m)
+    eff_start = max(m_start, sub_start)
+    eff_end = min(m_end, sub_end, today)
+    if eff_end < eff_start:
+        return (0, days_in_m)
+    return ((eff_end - eff_start).days + 1, days_in_m)
+
+
+def _compute_fixed_cost_deductions(
+    daily: dict[date, dict[str, dict[str, float]]],
+    sub_start: date,
+    sub_end: date,
+    shop_fee_groups: dict[str, str | None],
+    monthly_costs: dict[tuple[str, str], float],
+    today: date,
+) -> dict[str, float]:
+    """Apportion fee-group monthly burdens to each shop within [sub_start,
+    sub_end]. Returns {shop_code: amount_to_deduct_from_profit}.
+
+    Algorithm: for each month in the window, bucket the per-shop sales by
+    fee_group. Each group's burden = monthly_cost / days_in_month ×
+    elapsed_days. Split by shop's sales share within group; shops outside
+    any group (or in a group with 0 sales for the month) contribute 0.
+    """
+    if sub_end < sub_start:
+        return {}
+
+    # Step 1: per-month per-shop sales within the window.
+    per_month_shop: dict[str, dict[str, float]] = {}
+    for d, by_shop in daily.items():
+        if not (sub_start <= d <= sub_end):
+            continue
+        ym = _ym(d)
+        ms = per_month_shop.setdefault(ym, {})
+        for sc, vals in by_shop.items():
+            sales = vals["income_total"] or vals["actual_income"]
+            if sales:
+                ms[sc] = ms.get(sc, 0.0) + sales
+
+    out: dict[str, float] = {}
+    for ym, shop_sales in per_month_shop.items():
+        # Re-group this month's sales by fee_group (skip shops with no group).
+        per_group: dict[str, dict[str, float]] = {}
+        for sc, sales in shop_sales.items():
+            grp = shop_fee_groups.get(sc)
+            if not grp:
+                continue
+            per_group.setdefault(grp, {})[sc] = sales
+        if not per_group:
+            continue
+
+        year, mon = int(ym[:4]), int(ym[5:7])
+        elapsed, days_in_m = _elapsed_days_in_month(
+            year, mon, sub_start, sub_end, today,
+        )
+        if elapsed <= 0 or days_in_m <= 0:
+            continue
+
+        for grp, shops in per_group.items():
+            amount = monthly_costs.get((grp, ym), 0.0)
+            if amount <= 0:
+                continue
+            grp_sales = sum(shops.values())
+            if grp_sales <= 0:
+                continue  # 零销售月 → 不扣（用户决策）
+            daily_dept = amount / days_in_m
+            burden = daily_dept * elapsed
+            for sc, sales in shops.items():
+                out[sc] = out.get(sc, 0.0) + burden * (sales / grp_sales)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -303,22 +430,29 @@ def _sum_range_by_shop(
 
 def _kpis_from_per_shop(
     per_shop: dict[str, dict[str, float]],
-    fees: dict[str, tuple[float, float]],
+    tax_rates: dict[str, float],
+    fixed_costs: dict[str, float],
 ) -> dict[str, float]:
-    """Compute every KPI from per-shop sums + per-shop fees.
+    """Compute every KPI from per-shop sums + apportioned fixed costs.
 
-    公司利润率 = SUM(profit_s − per_capita_share_s − sales_s × tax_s) / SUM(sales_s).
+    公司利润率 = SUM(profit_s − fixed_cost_s − sales_s × tax_s) / SUM(sales_s).
     Other metrics aggregate the standard way (sum cols across shops).
+
+    `tax_rates`   : {shop_code: ship_service_tax_rate}  (default 0)
+    `fixed_costs` : {shop_code: total apportioned fixed cost for the window}
+                    — already pre-computed by _compute_fixed_cost_deductions
+                    for the EXACT same window these per-shop sums cover.
     """
     total = {col: 0.0 for col in _AGG_COLS}
     adj_profit_total = 0.0
     for sc, sums in per_shop.items():
         for col in _AGG_COLS:
             total[col] += sums[col]
-        share, tax_rate = fees.get(sc, (0.0, 0.0))
         sales_s = sums["income_total"] or sums["actual_income"]
         profit_s = sums["profit"]
-        adj_profit_total += profit_s - share - sales_s * tax_rate
+        tax_rate = tax_rates.get(sc, 0.0)
+        fixed_s = fixed_costs.get(sc, 0.0)
+        adj_profit_total += profit_s - fixed_s - sales_s * tax_rate
 
     gmv = total["income_total"] or total["actual_income"]
     cost = total["cost_total"]
@@ -396,6 +530,7 @@ async def get_kpis(
 ):
     start_date, end_date = normalize_range(start_date, end_date)
     prev_start, prev_end = previous_range(start_date, end_date)
+    today = date.today()
 
     resolved_codes = await _resolve_shop_codes(
         session, tenant_id, user, shop_codes, view_department_id,
@@ -403,10 +538,10 @@ async def get_kpis(
     # An empty list (vs None) means "force empty result". Skip the queries
     # and synthesize zeroed KPIs so the frontend renders cleanly.
     if resolved_codes == []:
-        empty_per_shop: dict[str, dict[str, float]] = {}
-        fees: dict[str, tuple[float, float]] = {}
-        curr_kpi = _kpis_from_per_shop(empty_per_shop, fees)
-        prev_kpi = _kpis_from_per_shop(empty_per_shop, fees)
+        empty: dict[str, dict[str, float]] = {}
+        empty_f: dict[str, float] = {}
+        curr_kpi = _kpis_from_per_shop(empty, empty_f, empty_f)
+        prev_kpi = _kpis_from_per_shop(empty, empty_f, empty_f)
         buckets = _enumerate_buckets(start_date, end_date, granularity)
         zero_series = [0.0] * len(buckets)
         items = []
@@ -429,22 +564,33 @@ async def get_kpis(
         resolved_codes, owners, categories, scope_owners,
     )
 
-    # Single query for shop-fee lookup (limited to shops actually in scope).
+    # Resolve per-shop fee_group + tax_rate, then load monthly cost rows
+    # for the groups actually represented (one round-trip each).
     all_shop_codes = set()
     for by_shop in daily.values():
         all_shop_codes.update(by_shop.keys())
-    fees = await shop_fees_map(session, tenant_id, list(all_shop_codes))
+    meta = await shop_meta_map(session, tenant_id, list(all_shop_codes))
+    shop_groups = {sc: grp for sc, (grp, _tax) in meta.items()}
+    tax_rates = {sc: tax for sc, (_grp, tax) in meta.items()}
+    fee_groups_in_scope = sorted({g for g in shop_groups.values() if g})
+    monthly_costs = await monthly_costs_map(
+        session, tenant_id, fee_groups_in_scope,
+    ) if fee_groups_in_scope else {}
 
-    curr_per_shop = _sum_range_by_shop(daily, start_date, end_date)
-    prev_per_shop = _sum_range_by_shop(daily, prev_start, prev_end)
-    curr_kpi = _kpis_from_per_shop(curr_per_shop, fees)
-    prev_kpi = _kpis_from_per_shop(prev_per_shop, fees)
+    def _kpi_for(sub_start: date, sub_end: date) -> dict[str, float]:
+        per_shop = _sum_range_by_shop(daily, sub_start, sub_end)
+        fixed = _compute_fixed_cost_deductions(
+            daily, sub_start, sub_end, shop_groups, monthly_costs, today,
+        )
+        return _kpis_from_per_shop(per_shop, tax_rates, fixed)
+
+    curr_kpi = _kpi_for(start_date, end_date)
+    prev_kpi = _kpi_for(prev_start, prev_end)
 
     buckets = _enumerate_buckets(start_date, end_date, granularity)
     series_by_metric: dict[str, list[float]] = {m.key: [] for m in METRIC_DEFS}
     for b_start, b_end, _label in buckets:
-        bucket_per_shop = _sum_range_by_shop(daily, b_start, b_end)
-        bucket_kpi = _kpis_from_per_shop(bucket_per_shop, fees)
+        bucket_kpi = _kpi_for(b_start, b_end)
         for m in METRIC_DEFS:
             series_by_metric[m.key].append(bucket_kpi[m.key])
 
@@ -481,6 +627,7 @@ async def get_trend(
     if metric not in {m.key for m in METRIC_DEFS}:
         metric = "sales"
     start_date, end_date = normalize_range(start_date, end_date)
+    today = date.today()
 
     resolved_codes = await _resolve_shop_codes(
         session, tenant_id, user, shop_codes, view_department_id,
@@ -500,13 +647,25 @@ async def get_trend(
     all_shop_codes = set()
     for by_shop in daily.values():
         all_shop_codes.update(by_shop.keys())
-    fees = await shop_fees_map(session, tenant_id, list(all_shop_codes))
+    meta = await shop_meta_map(session, tenant_id, list(all_shop_codes))
+    shop_groups = {sc: grp for sc, (grp, _tax) in meta.items()}
+    tax_rates = {sc: tax for sc, (_grp, tax) in meta.items()}
+    fee_groups_in_scope = sorted({g for g in shop_groups.values() if g})
+    monthly_costs = await monthly_costs_map(
+        session, tenant_id, fee_groups_in_scope,
+    ) if fee_groups_in_scope else {}
 
     buckets = _enumerate_buckets(start_date, end_date, granularity)
     points = []
     for b_start, b_end, label in buckets:
         bucket_per_shop = _sum_range_by_shop(daily, b_start, b_end)
-        bucket_kpi = _kpis_from_per_shop(bucket_per_shop, fees)
+        # Per-bucket apportionment: each bucket gets ONLY the portion of
+        # its containing month(s) burden that falls inside the bucket's
+        # date range. Day bucket → 1/days_in_month of that month's cost.
+        bucket_fixed = _compute_fixed_cost_deductions(
+            daily, b_start, b_end, shop_groups, monthly_costs, today,
+        )
+        bucket_kpi = _kpis_from_per_shop(bucket_per_shop, tax_rates, bucket_fixed)
         points.append({"date": label, "value": bucket_kpi[metric]})
     return {"metric": metric, "points": points, "granularity": granularity}
 
@@ -521,11 +680,15 @@ async def get_category_breakdown(
 ):
     """Per-category aggregate with prev-period 环比 on sales + profit.
 
-    公司利润率 inside a category row uses the same per-shop formula:
-    aggregate (date, shop) within that category, look up fees, and apply.
+    Fixed cost allocation per category: each shop's full-range fixed cost
+    (apportioned across fee groups for the window) is split into the
+    categories that shop sold in, weighted by sales share. This makes the
+    SUM(cat company_profit_rate components) reconcile with the overall
+    公司利润率 displayed on the KPI cards.
     """
     start_date, end_date = normalize_range(start_date, end_date)
     prev_start, prev_end = previous_range(start_date, end_date)
+    today = date.today()
 
     resolved_codes = await _resolve_shop_codes(
         session, tenant_id, user, shop_codes, view_department_id,
@@ -551,13 +714,46 @@ async def get_category_breakdown(
     curr_rows = (await session.execute(_select_for(start_date, end_date))).all()
     prev_rows = (await session.execute(_select_for(prev_start, prev_end))).all()
 
-    # Collect all shop codes seen so we can fetch fees in one query.
+    # Daily-by-shop (no category dimension) feeds both the fixed-cost
+    # apportionment AND the per-shop total sales we need for the cat-split.
+    # Same WHERE filters as the per-cat query above, including categories.
+    daily_curr = await _daily_aggregates_by_shop(
+        session, tenant_id, start_date, end_date,
+        resolved_codes, owners, categories, scope_owners,
+    )
+    daily_prev = await _daily_aggregates_by_shop(
+        session, tenant_id, prev_start, prev_end,
+        resolved_codes, owners, categories, scope_owners,
+    )
+
     all_codes: set[str] = set()
     for r in curr_rows:
         all_codes.add(r.shop_code or "")
     for r in prev_rows:
         all_codes.add(r.shop_code or "")
-    fees = await shop_fees_map(session, tenant_id, list(all_codes))
+    meta = await shop_meta_map(session, tenant_id, list(all_codes))
+    shop_groups = {sc: grp for sc, (grp, _tax) in meta.items()}
+    tax_rates = {sc: tax for sc, (_grp, tax) in meta.items()}
+    fee_groups_in_scope = sorted({g for g in shop_groups.values() if g})
+    monthly_costs = await monthly_costs_map(
+        session, tenant_id, fee_groups_in_scope,
+    ) if fee_groups_in_scope else {}
+
+    def _shop_full_fixed_and_sales(daily, sub_start, sub_end):
+        """Pre-compute per-shop full fixed cost AND per-shop total sales
+        across the sub-range — both needed to allocate to categories."""
+        fixed = _compute_fixed_cost_deductions(
+            daily, sub_start, sub_end, shop_groups, monthly_costs, today,
+        )
+        per_shop = _sum_range_by_shop(daily, sub_start, sub_end)
+        sales_total = {
+            sc: (vals["income_total"] or vals["actual_income"])
+            for sc, vals in per_shop.items()
+        }
+        return fixed, sales_total
+
+    curr_fixed, curr_sales_total = _shop_full_fixed_and_sales(daily_curr, start_date, end_date)
+    prev_fixed, prev_sales_total = _shop_full_fixed_and_sales(daily_prev, prev_start, prev_end)
 
     def to_per_shop_per_cat(rows):
         """{category: {shop_code: {col: value, ...}}}"""
@@ -579,13 +775,30 @@ async def get_category_breakdown(
     curr_by_cat = to_per_shop_per_cat(curr_rows)
     prev_by_cat = to_per_shop_per_cat(prev_rows)
 
+    def _cat_allocated_fixed(per_shop_in_cat, shop_full_fixed, shop_full_sales):
+        """Allocate each shop's full-range fixed cost to this category
+        proportionally to the category's share of the shop's total sales.
+        Shops with 0 total sales contribute 0 (avoid div-by-zero)."""
+        out: dict[str, float] = {}
+        for sc, sums in per_shop_in_cat.items():
+            total_sales = shop_full_sales.get(sc, 0.0)
+            if total_sales <= 0:
+                continue
+            cat_sales = sums["income_total"] or sums["actual_income"]
+            share = cat_sales / total_sales
+            out[sc] = shop_full_fixed.get(sc, 0.0) * share
+        return out
+
     out = []
     for cat, per_shop in curr_by_cat.items():
-        kpi = _kpis_from_per_shop(per_shop, fees)
+        cat_fixed = _cat_allocated_fixed(per_shop, curr_fixed, curr_sales_total)
+        kpi = _kpis_from_per_shop(per_shop, tax_rates, cat_fixed)
         prev_per_shop = prev_by_cat.get(cat, {})
-        prev_kpi = _kpis_from_per_shop(prev_per_shop, fees) if prev_per_shop else {
-            "sales": 0.0, "profit": 0.0,
-        }
+        if prev_per_shop:
+            prev_cat_fixed = _cat_allocated_fixed(prev_per_shop, prev_fixed, prev_sales_total)
+            prev_kpi = _kpis_from_per_shop(prev_per_shop, tax_rates, prev_cat_fixed)
+        else:
+            prev_kpi = {"sales": 0.0, "profit": 0.0}
 
         out.append({
             "name": cat,

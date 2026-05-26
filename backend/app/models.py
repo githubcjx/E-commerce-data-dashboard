@@ -104,13 +104,19 @@ class Shop(Base):
       - view_department_id: which department's 部门视角 reveals this shop
         (this IS an FK to departments — used by the 部门视角 filter)
       - fee_group_name: a FREE-TEXT label, purely cosmetic, used to group
-        shops with the same fee config in the 店铺管理 UI. It has NO
-        relation to the departments table.
-      - per_capita_share, ship_service_tax_rate: the two fee values that
-        feed the 公司利润率 formula
+        shops with the same fee config in the 店铺管理 UI. It also keys
+        into fee_group_monthly_cost for the monthly 固定费用 lookup.
+      - ship_service_tax_rate: the per-shop %-based fee. The 固定费用
+        (formerly per_capita_share, a flat per-shop amount) is GONE —
+        replaced by fee_group_monthly_cost, which stores **monthly
+        totals per fee group** and is apportioned at query time.
 
-    Formula (per-shop, then aggregated across selected shops):
-        adj_profit_s  = profit_s − per_capita_share_s − sales_s × tax_rate_s
+    Formula (per-shop, per-month, then aggregated):
+        Per fee group g, per month m:
+          burden_g_m = monthly_amount(g, m) / days_in_month(m) × elapsed_days_in_range(m)
+        Per shop s in g, for the queried range:
+          fixed_cost_s += burden_g_m × (sales_s_m / sum(sales_*_m for shops in g))
+        adj_profit_s = profit_s − fixed_cost_s − sales_s × tax_rate_s
         公司利润率   = SUM(adj_profit_s) / SUM(sales_s)
     """
     __tablename__ = "shops"
@@ -130,11 +136,53 @@ class Shop(Base):
         Integer, ForeignKey("departments.id", ondelete="SET NULL")
     )
     fee_group_name: Mapped[str | None] = mapped_column(String(100))
-    per_capita_share: Mapped[Decimal] = mapped_column(
-        Numeric(18, 4), nullable=False, default=Decimal("0"), server_default="0",
-    )
     ship_service_tax_rate: Mapped[Decimal] = mapped_column(
         Numeric(6, 4), nullable=False, default=Decimal("0"), server_default="0",
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class FeeGroupMonthlyCost(Base):
+    """Per-month, per-fee-group total fixed cost.
+
+    Each row = (tenant, fee_group_name, YYYY-MM) → amount (yuan).
+    `amount` is the WHOLE-MONTH固定费用总额 for that fee group.
+
+    Apportionment at query time:
+      daily = amount / calendar_days_in(year_month)
+      burden_in_range = daily × elapsed_days(year_month ∩ query_range ∩ [..today])
+      shop_share = burden_in_range × (shop_sales_in_month / fee_group_sales_in_month)
+
+    A missing (tenant, group, month) row defaults to 0 — the UI ensures
+    every month from the earliest imported data through the current month
+    has a row (default 0), but the calc layer treats absence the same way
+    so it stays correct even if the UI hasn't been opened yet.
+    """
+    __tablename__ = "fee_group_monthly_cost"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "fee_group_name", "year_month",
+            name="uq_fgmc_tenant_group_month",
+        ),
+        Index("ix_fgmc_tenant_group", "tenant_id", "fee_group_name"),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
+    tenant_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    fee_group_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    # CHAR(7) "YYYY-MM" — string keeps comparison/ordering trivial across
+    # both PG and SQLite, and avoids a DATE column we'd just keep snapping
+    # to day=1 anyway.
+    year_month: Mapped[str] = mapped_column(String(7), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(
+        Numeric(18, 4), nullable=False, default=Decimal("0"), server_default="0",
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

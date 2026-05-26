@@ -11,3 +11,8 @@ openpyxl==3.1.5
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 python-dotenv==1.0.1
+
+# Tests — pure-function unit tests (no DB / no asyncio needed yet).
+# Kept in main requirements so `docker compose exec backend pytest`
+# runs without a separate image layer.
+pytest==8.3.3

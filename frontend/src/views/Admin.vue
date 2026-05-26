@@ -9,6 +9,7 @@ import {
 } from "../api/departments";
 import {
   listShops, listFeeGroups, saveFeeGroup, deleteFeeGroup,
+  listMonthlyCosts, saveMonthlyCosts,
 } from "../api/shops";
 import {
   useUserStore, ROLE_PLATFORM, ROLE_TENANT_SUPER, ROLE_TENANT_ADMIN, ROLE_TENANT_USER,
@@ -524,21 +525,21 @@ async function removeDept(d) {
 // ---------------------------------------------------------------------------
 const shopDialogOpen = ref(false);
 const editingGroup = ref(null);  // the fee-group being edited (null = create)
+// 固定费用 (formerly per_capita_share) is now per-month — edited via the
+// separate "按月费用" dialog. This form keeps only name + tax_rate + member
+// shops; per-month amounts live in fee_group_monthly_cost on the backend.
 const shopForm = ref({
   fee_group_name: "",
-  per_capita_share: "0",
   ship_service_tax_rate_pct: "0",
   shop_codes: [],
 });
 const shopFormError = ref("");
 const shopFeeGroupErr = ref("");
-const shopShareErr = ref("");
 const shopTaxErr = ref("");
 
 function resetShopErrors() {
   shopFormError.value = "";
   shopFeeGroupErr.value = "";
-  shopShareErr.value = "";
   shopTaxErr.value = "";
 }
 
@@ -546,7 +547,6 @@ function openShopCreate() {
   editingGroup.value = null;
   shopForm.value = {
     fee_group_name: "",
-    per_capita_share: "0",
     ship_service_tax_rate_pct: "0",
     shop_codes: [],
   };
@@ -560,7 +560,6 @@ function openShopEdit(group) {
   editingGroup.value = group;
   shopForm.value = {
     fee_group_name: group.name,
-    per_capita_share: String(Number(group.per_capita_share || 0)),
     ship_service_tax_rate_pct: (Number(group.ship_service_tax_rate || 0) * 100).toFixed(2).replace(/\.?0+$/, ""),
     shop_codes: (group.shops || []).map((s) => s.shop_code),
   };
@@ -593,8 +592,6 @@ function validateShopForm() {
   shopForm.value.fee_group_name = label;
   if (!label) { shopFeeGroupErr.value = "请填写费用所属部门名称"; ok = false; }
   else if (label.length > 100) { shopFeeGroupErr.value = "名称不能超过 100 个字符"; ok = false; }
-  const share = Number(shopForm.value.per_capita_share);
-  if (!Number.isFinite(share) || share < 0) { shopShareErr.value = "请输入大于等于 0 的数字"; ok = false; }
   const taxPct = Number(shopForm.value.ship_service_tax_rate_pct);
   if (!Number.isFinite(taxPct) || taxPct < 0 || taxPct >= 100) {
     shopTaxErr.value = "请输入 0–99.99 之间的数字"; ok = false;
@@ -611,12 +608,12 @@ async function submitShop() {
   if (!validateShopForm()) return;
   const body = {
     name: shopForm.value.fee_group_name,
-    per_capita_share: Number(shopForm.value.per_capita_share),
     ship_service_tax_rate: Number(shopForm.value.ship_service_tax_rate_pct) / 100,
     shop_codes: shopForm.value.shop_codes.slice(),
   };
   // On edit, pass the original name so the backend can reconcile members
-  // (shops removed from the multi-select get cleared) and accept renames.
+  // (shops removed from the multi-select get cleared), accept renames,
+  // AND cascade the rename to fee_group_monthly_cost rows.
   if (editingGroup.value) body.original_name = editingGroup.value.name;
   try {
     const r = await saveFeeGroup(body, targetTenantId.value);
@@ -629,6 +626,90 @@ async function submitShop() {
   } catch (e) {
     shopFormError.value = e.message || "保存失败";
   }
+}
+
+// ---------------------------------------------------------------------------
+// Per-month 固定费用 dialog
+// ---------------------------------------------------------------------------
+// One row per month from the tenant's earliest imported data month → 当月,
+// guaranteed to exist (the backend pads missing months with 0). Users can
+// only EDIT amounts — no add / no delete / no rearrange.
+const monthlyDialogOpen = ref(false);
+const monthlyGroupName = ref("");        // which group we're editing
+const monthlyRows = ref([]);             // [{year_month, amount, is_current_month, original}]
+const monthlyLoading = ref(false);
+const monthlySaving = ref(false);
+const monthlyError = ref("");
+
+// Display order: most recent month at top; the backend returns ascending.
+const monthlyRowsDesc = computed(() => monthlyRows.value.slice().reverse());
+
+// Did any row's amount diverge from what we loaded? Drives the save button.
+const monthlyDirtyCount = computed(
+  () => monthlyRows.value.filter((r) => Number(r.amount) !== Number(r.original)).length,
+);
+
+async function openMonthlyDialog(group) {
+  monthlyGroupName.value = group.name;
+  monthlyDialogOpen.value = true;
+  monthlyError.value = "";
+  monthlyLoading.value = true;
+  monthlyRows.value = [];
+  try {
+    const data = await listMonthlyCosts(group.name, targetTenantId.value);
+    monthlyRows.value = (data.rows || []).map((r) => ({
+      year_month: r.year_month,
+      amount: Number(r.amount || 0),
+      is_current_month: !!r.is_current_month,
+      original: Number(r.amount || 0),  // snapshot for dirty-tracking
+    }));
+  } catch (e) {
+    monthlyError.value = e.message || "加载失败";
+  } finally {
+    monthlyLoading.value = false;
+  }
+}
+
+function onMonthlyAmountInput(row, raw) {
+  // Allow empty string (treated as 0); reject non-numbers / negatives.
+  const v = raw === "" || raw == null ? 0 : Number(raw);
+  if (!Number.isFinite(v) || v < 0) return;
+  row.amount = v;
+}
+
+async function submitMonthly() {
+  if (monthlyDirtyCount.value === 0) {
+    monthlyDialogOpen.value = false;
+    return;
+  }
+  // Send only changed rows — smaller payload AND skips no-op work in the
+  // backend's diff path.
+  const items = monthlyRows.value
+    .filter((r) => Number(r.amount) !== Number(r.original))
+    .map((r) => ({ year_month: r.year_month, amount: Number(r.amount) }));
+  monthlySaving.value = true;
+  monthlyError.value = "";
+  try {
+    const r = await saveMonthlyCosts(monthlyGroupName.value, items, targetTenantId.value);
+    ui.showToast(`已保存 ${r.saved || 0} 处变更`, "success");
+    // Re-snapshot originals so the dirty count clears.
+    for (const row of monthlyRows.value) row.original = row.amount;
+    // Refresh the table — current-month cost on the main list might have changed.
+    await refreshShops();
+    monthlyDialogOpen.value = false;
+  } catch (e) {
+    monthlyError.value = e.message || "保存失败";
+  } finally {
+    monthlySaving.value = false;
+  }
+}
+
+function cancelMonthly() {
+  if (monthlyDirtyCount.value > 0
+      && !confirm(`放弃 ${monthlyDirtyCount.value} 处未保存的修改？`)) {
+    return;
+  }
+  monthlyDialogOpen.value = false;
 }
 
 // Delete a whole fee group — clears the (name, values) bundle off every
@@ -765,12 +846,13 @@ watch(() => route.query.tenant_id, async () => {
 
     <!-- ======================= SHOPS TAB ======================= -->
     <!-- One row per fee group (= per distinct fee_group_name). Member
-         shops live behind the edit dialog. -->
+         shops live behind the 编辑 dialog; per-month 固定费用 amounts
+         live behind the 按月费用 dialog. -->
     <table v-else class="tbl">
       <thead>
         <tr>
           <th style="text-align:left">费用所属部门</th>
-          <th style="text-align:left">固定费用（人员均摊）</th>
+          <th style="text-align:left">本月固定费用</th>
           <th style="text-align:left">百分比费用（发货客服税费）</th>
           <th style="text-align:left">适用店铺数</th>
           <th style="text-align:left">创建时间</th>
@@ -781,7 +863,16 @@ watch(() => route.query.tenant_id, async () => {
       <tbody>
         <tr v-for="g in feeGroups" :key="g.name">
           <td style="text-align:left">{{ g.name }}</td>
-          <td style="text-align:left" class="mono">{{ Number(g.per_capita_share || 0).toLocaleString('en-US') }}</td>
+          <td style="text-align:left" class="mono">
+            <template v-if="g.current_month_cost != null">
+              {{ Number(g.current_month_cost).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) }}
+              <span class="t-muted" style="font-size:11px;font-family:var(--font-sans)"> · {{ g.current_month }}</span>
+            </template>
+            <template v-else>
+              <span class="t-muted">—</span>
+              <span class="t-muted" style="font-size:11px"> （{{ g.current_month }} 未录入，按 0 计）</span>
+            </template>
+          </td>
           <td style="text-align:left" class="mono">{{ (Number(g.ship_service_tax_rate || 0) * 100).toFixed(2).replace(/\.?0+$/, '') }}%</td>
           <td style="text-align:left">
             <span :title="(g.shops || []).map((s) => s.shop_name || s.shop_code).join('、')">
@@ -791,6 +882,7 @@ watch(() => route.query.tenant_id, async () => {
           <td style="text-align:left" class="t-muted">{{ new Date(g.created_at).toLocaleString("zh-CN", { hour12: false }) }}</td>
           <td style="text-align:left" class="t-muted">{{ new Date(g.updated_at).toLocaleString("zh-CN", { hour12: false }) }}</td>
           <td>
+            <button v-if="canManageShops" class="btn ghost sm" @click="openMonthlyDialog(g)">按月费用</button>
             <button v-if="canManageShops" class="btn ghost sm" @click="openShopEdit(g)">编辑</button>
             <button
               v-if="canManageShops"
@@ -810,7 +902,9 @@ watch(() => route.query.tenant_id, async () => {
   </section>
 
   <!-- =================== USER DIALOG =================== -->
-  <div v-if="dialogOpen" class="modal-backdrop" @click.self="dialogOpen = false">
+  <!-- Backdrop is non-dismissive across all modals: clicking outside
+       doesn't close, to protect unsaved edits. ✕ / Cancel only. -->
+  <div v-if="dialogOpen" class="modal-backdrop">
     <div class="modal-card">
       <header class="modal-head">
         <span class="panel-title">{{ editing ? "编辑账号" : "新增账号" }}</span>
@@ -943,7 +1037,7 @@ watch(() => route.query.tenant_id, async () => {
   </div>
 
   <!-- =================== DEPARTMENT DIALOG =================== -->
-  <div v-if="deptDialogOpen" class="modal-backdrop" @click.self="deptDialogOpen = false">
+  <div v-if="deptDialogOpen" class="modal-backdrop">
     <div class="modal-card">
       <header class="modal-head">
         <span class="panel-title">{{ editingDept ? "编辑部门" : "新增部门" }}</span>
@@ -1006,7 +1100,7 @@ watch(() => route.query.tenant_id, async () => {
   </div>
 
   <!-- =================== SHOP FEE DIALOG =================== -->
-  <div v-if="shopDialogOpen" class="modal-backdrop" @click.self="shopDialogOpen = false">
+  <div v-if="shopDialogOpen" class="modal-backdrop">
     <div class="modal-card">
       <header class="modal-head">
         <span class="panel-title">{{ editingGroup ? "编辑费用配置" : "新增费用配置" }}</span>
@@ -1027,13 +1121,8 @@ watch(() => route.query.tenant_id, async () => {
           <div v-if="shopFeeGroupErr" class="field-error">{{ shopFeeGroupErr }}</div>
         </div>
 
-        <div class="field" :class="{ 'has-error': shopShareErr }">
-          <label>人员均摊（固定费用） <span class="req-mark" title="必填">*</span></label>
-          <div class="cfg-input">
-            <input type="number" min="0" step="0.01" v-model="shopForm.per_capita_share" @input="shopShareErr = ''" />
-            <span class="suffix">元</span>
-          </div>
-          <div v-if="shopShareErr" class="field-error">{{ shopShareErr }}</div>
+        <div class="field-note">
+          <strong>固定费用（人员均摊）</strong>已改为按月录入。请在列表的「按月费用」按钮中设置每个月的总额。
         </div>
 
         <div class="field" :class="{ 'has-error': shopTaxErr }">
@@ -1071,6 +1160,77 @@ watch(() => route.query.tenant_id, async () => {
       <footer class="modal-foot">
         <button class="btn" @click="shopDialogOpen = false">取消</button>
         <button class="btn primary" @click="submitShop">保存</button>
+      </footer>
+    </div>
+  </div>
+
+  <!-- =================== MONTHLY COST DIALOG =================== -->
+  <!-- Rows are data-driven: backend returns one row per calendar month
+       from the tenant's earliest imported data through the current month.
+       Users only EDIT amounts — no add/remove/rearrange. -->
+  <div v-if="monthlyDialogOpen" class="modal-backdrop">
+    <div class="modal-card monthly-card">
+      <header class="modal-head">
+        <span class="panel-title">按月固定费用 — {{ monthlyGroupName }}</span>
+        <button class="btn ghost sm" @click="cancelMonthly">✕</button>
+      </header>
+      <div class="modal-body">
+        <div class="field-note">
+          每行对应一个自然月（从导入数据中最早的月份到当月）。
+          未录入或设为 0 的月份按 0 计算，不参与公司利润率扣除。
+          底部为最早的月份，可逐月补齐。
+        </div>
+
+        <div v-if="monthlyLoading" class="t-muted" style="padding:12px 0">加载中…</div>
+
+        <table v-else class="tbl monthly-tbl">
+          <thead>
+            <tr>
+              <th style="text-align:left;width:140px">月份</th>
+              <th style="text-align:left">固定费用总额（元）</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="row in monthlyRowsDesc" :key="row.year_month"
+                :class="{ 'is-current': row.is_current_month,
+                          'is-dirty': Number(row.amount) !== Number(row.original) }">
+              <td style="text-align:left">
+                <span class="mono">{{ row.year_month }}</span>
+                <span v-if="row.is_current_month" class="month-chip">本月</span>
+              </td>
+              <td>
+                <div class="cfg-input">
+                  <input
+                    type="number" min="0" step="0.01"
+                    :value="row.amount"
+                    @input="onMonthlyAmountInput(row, $event.target.value)"
+                  />
+                  <span class="suffix">元</span>
+                  <span v-if="Number(row.amount) !== Number(row.original)" class="dirty-dot" title="未保存的修改"></span>
+                </div>
+              </td>
+            </tr>
+            <tr v-if="!monthlyRows.length">
+              <td colspan="2" class="empty-state">
+                暂无可编辑的月份（请先导入销售数据，确定起始月份）。
+              </td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div v-if="monthlyError" class="error">{{ monthlyError }}</div>
+      </div>
+      <footer class="modal-foot">
+        <span class="t-muted" style="font-size:12px;margin-right:auto">
+          <template v-if="monthlyDirtyCount > 0">{{ monthlyDirtyCount }} 处未保存的修改</template>
+          <template v-else>无未保存修改</template>
+        </span>
+        <button class="btn" :disabled="monthlySaving" @click="cancelMonthly">取消</button>
+        <button
+          class="btn primary"
+          :disabled="monthlySaving || monthlyDirtyCount === 0"
+          @click="submitMonthly"
+        >{{ monthlySaving ? "保存中…" : "保存" }}</button>
       </footer>
     </div>
   </div>
@@ -1122,6 +1282,34 @@ watch(() => route.query.tenant_id, async () => {
   background: var(--surface);
 }
 .cfg-input input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-line); }
+
+/* Inline notice replacing the removed 人员均摊 input — directs admins to
+   the 按月费用 dialog. Soft accent surface to read as informational, not
+   error. */
+.field-note {
+  padding: 10px 12px; margin-bottom: 14px;
+  background: var(--accent-soft); border: 1px solid var(--accent-line);
+  border-radius: 8px; font-size: 12.5px; color: var(--ink-2); line-height: 1.55;
+}
+.field-note strong { color: var(--ink); font-weight: 600; }
+
+/* Monthly-cost dialog: wider modal, scrollable table, current-month
+   highlight, dirty-row tint, "未保存" dot on changed inputs. */
+.monthly-card { width: 520px; }
+.monthly-tbl { margin-top: 4px; }
+.monthly-tbl th, .monthly-tbl td { padding: 8px 10px; }
+.monthly-tbl tr.is-current td { background: var(--accent-soft); }
+.monthly-tbl tr.is-dirty td { background: oklch(95% 0.04 80 / 0.6); }
+.month-chip {
+  display: inline-block; margin-left: 8px;
+  padding: 1px 8px; border-radius: 999px;
+  font-size: 10.5px; font-family: var(--font-mono); font-weight: 600;
+  letter-spacing: 0.04em; color: #fff; background: var(--accent);
+}
+.dirty-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: oklch(70% 0.18 80); flex-shrink: 0;
+}
 .cfg-input .suffix { color: var(--ink-4); font-family: var(--font-mono); font-size: 13px; }
 
 .tabs-wrap { display: inline-flex; gap: 4px; padding: 4px; background: var(--bg-elev); border-radius: 10px; }
