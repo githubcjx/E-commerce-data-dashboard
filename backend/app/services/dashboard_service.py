@@ -17,26 +17,37 @@ Trend chart:
     inside the chosen range (granularity = day | week | month | year). The
     frontend uses ECharts dataZoom to show only a window initially.
 
-公司利润率 (per-month apportionment, replaces the old flat per-shop share):
+公司利润率 (per-DAY apportionment, whole-department denominator):
 
-    For each fee group g and calendar month m:
-      monthly_amount(g, m)   — from fee_group_monthly_cost (default 0)
-      days_in_m              — calendar days in m
-      elapsed_in_window(m)   — max(0, days in (m ∩ query-range ∩ [..today]))
-      burden(g, m)           = monthly_amount / days_in_m × elapsed_in_window
+    For each day d and fee group g:
+      monthly_amount(g, ym(d)) — from fee_group_monthly_cost (default 0)
+      days_in_month(d)         — calendar days in d's month
+      daily_cost(g)            = monthly_amount / days_in_month
+      dept_day(g)              = the WHOLE fee group's sales on d — ALL its
+                                 shops/owners/categories. Only the tenant and
+                                 the user's data-scope limit it; the owner /
+                                 category / shop-picker filters DO NOT shrink
+                                 it (this is the denominator).
+      Each filtered shop s in g on d:
+        shop_fixed_s += daily_cost(g) × (sales_s_on_d / dept_day(g))
 
-    Within m, that burden is split across shops in g by sales share:
-      shop_fixed_s += burden(g, m) × (sales_s_in_m / sum_sales_for_g_in_m)
-    Rule: if a fee group has 0 sales in m within the window, the burden
-    is NOT deducted (we don't redistribute to a no-sales group).
+    The denominator is the whole department, NOT the filtered subset. So
+    filtering by one owner (or one shop) charges only that owner/shop its
+    proportional slice of the department's daily cost — never the whole
+    department's burden. (The previous version used the filtered subset as
+    the denominator, which dumped the entire burden onto whatever you
+    filtered to — the bug this replaced.)
+
+    Rules:
+      • a (group, day) with 0 department sales → not deducted (不扣)
+      • days after `today` are skipped (已发生天数 only)
+      • every granularity (KPI total, sparkline bucket, trend bucket,
+        category row) is a plain sum of the same per-day atoms, so they
+        reconcile exactly with no elapsed-day fudge factor.
 
     Then per shop, the existing formula:
       adj_profit_s = profit_s − shop_fixed_s − sales_s × tax_rate_s
       公司利润率   = SUM(adj_profit_s) / SUM(sales_s)
-
-    This applies at every granularity (KPI total, KPI sparkline bucket,
-    trend bucket, category row) by re-running the apportionment on the
-    sub-window's per-(date, shop) data.
 """
 from __future__ import annotations
 
@@ -240,93 +251,152 @@ async def monthly_costs_map(
     return {(name, ym): float(amt or 0) for name, ym, amt in rows}
 
 
+async def dept_shops_for_groups(
+    session: AsyncSession, tenant_id: int, fee_groups: list[str],
+) -> dict[str, str]:
+    """Return {shop_code: fee_group_name} for ALL shops in the given fee
+    groups — the denominator's shop universe.
+
+    This is deliberately INDEPENDENT of the dashboard's owner / category /
+    shop-picker filters: the fixed cost is apportioned against the WHOLE
+    department's sales, so we must know every shop in each group, not just
+    the ones that survived the current filter. (Data-scope isolation is
+    applied later, on the sales query, not here.)
+    """
+    if not fee_groups:
+        return {}
+    rows = (await session.execute(
+        select(Shop.shop_code, Shop.fee_group_name)
+        .where(Shop.tenant_id == tenant_id, Shop.fee_group_name.in_(fee_groups))
+    )).all()
+    return {code: grp for code, grp in rows if code and grp}
+
+
 # ---------------------------------------------------------------------------
-# Per-month fixed-cost apportionment
+# Per-day fixed-cost apportionment
 # ---------------------------------------------------------------------------
 
 def _ym(d: date) -> str:
     return f"{d.year:04d}-{d.month:02d}"
 
 
-def _elapsed_days_in_month(
-    year: int, month: int, sub_start: date, sub_end: date, today: date,
-) -> tuple[int, int]:
-    """(elapsed_days, days_in_month) for the (month ∩ sub_range ∩ [..today])
-    intersection. Past months in range count full days; the current month
-    counts up to today; future months count 0.
+def _dept_day_group_sales(
+    dept_daily: dict[date, dict[str, dict[str, float]]],
+    dept_shop_fee_groups: dict[str, str | None],
+) -> dict[date, dict[str, float]]:
+    """Precompute the DENOMINATOR: {date: {fee_group: total_dept_sales}}.
+
+    `dept_daily` is the department-wide per-(date, shop) sales map (fetched
+    WITHOUT owner/category/shop-picker filters, so it covers every shop in
+    each group). We reduce it to a per-day per-group total — the "部门当天
+    总销售额" each shop's share is measured against.
     """
-    days_in_m = calendar.monthrange(year, month)[1]
-    m_start = date(year, month, 1)
-    m_end = date(year, month, days_in_m)
-    eff_start = max(m_start, sub_start)
-    eff_end = min(m_end, sub_end, today)
-    if eff_end < eff_start:
-        return (0, days_in_m)
-    return ((eff_end - eff_start).days + 1, days_in_m)
+    out: dict[date, dict[str, float]] = {}
+    for d, by_shop in dept_daily.items():
+        g_sales = out.setdefault(d, {})
+        for sc, vals in by_shop.items():
+            grp = dept_shop_fee_groups.get(sc)
+            if not grp:
+                continue
+            sales = vals["income_total"] or vals["actual_income"]
+            if sales:
+                g_sales[grp] = g_sales.get(grp, 0.0) + sales
+    return out
 
 
 def _compute_fixed_cost_deductions(
     daily: dict[date, dict[str, dict[str, float]]],
+    dept_day_group_sales: dict[date, dict[str, float]],
     sub_start: date,
     sub_end: date,
     shop_fee_groups: dict[str, str | None],
     monthly_costs: dict[tuple[str, str], float],
     today: date,
 ) -> dict[str, float]:
-    """Apportion fee-group monthly burdens to each shop within [sub_start,
-    sub_end]. Returns {shop_code: amount_to_deduct_from_profit}.
+    """Per-DAY apportionment of fee-group monthly fixed cost to each filtered
+    shop within [sub_start, sub_end]. Returns {shop_code: amount_to_deduct}.
 
-    Algorithm: for each month in the window, bucket the per-shop sales by
-    fee_group. Each group's burden = monthly_cost / days_in_month ×
-    elapsed_days. Split by shop's sales share within group; shops outside
-    any group (or in a group with 0 sales for the month) contribute 0.
+    For each day d (sub_start ≤ d ≤ sub_end and d ≤ today):
+        daily_cost(g) = monthly_amount(g, ym(d)) / days_in_month(d)
+        dept_day(g)   = department-wide sales of g on d   (the denominator,
+                        from `dept_day_group_sales`)
+        deduction_s  += daily_cost(g) × (shop_s_sales_on_d / dept_day(g))
+
+    The denominator is the WHOLE department's daily sales, NOT the filtered
+    subset `daily` — that's the whole point: filtering by one owner/shop only
+    charges its proportional share, never the whole group's burden.
+
+    Rules:
+      • a (group, day) with 0 department sales → not deducted (不扣)
+      • days after `today` are skipped (已发生天数 only)
+      • the result is a plain sum over days, so any coarser granularity
+        (week/month bucket, full overview) equals the sum of its days.
     """
+    out: dict[str, float] = {}
     if sub_end < sub_start:
-        return {}
+        return out
 
-    # Step 1: per-month per-shop sales within the window.
-    per_month_shop: dict[str, dict[str, float]] = {}
     for d, by_shop in daily.items():
-        if not (sub_start <= d <= sub_end):
+        if not (sub_start <= d <= sub_end) or d > today:
             continue
         ym = _ym(d)
-        ms = per_month_shop.setdefault(ym, {})
-        for sc, vals in by_shop.items():
-            sales = vals["income_total"] or vals["actual_income"]
-            if sales:
-                ms[sc] = ms.get(sc, 0.0) + sales
-
-    out: dict[str, float] = {}
-    for ym, shop_sales in per_month_shop.items():
-        # Re-group this month's sales by fee_group (skip shops with no group).
+        # Filtered shops with sales on day d, grouped by fee_group.
         per_group: dict[str, dict[str, float]] = {}
-        for sc, sales in shop_sales.items():
+        for sc, vals in by_shop.items():
             grp = shop_fee_groups.get(sc)
             if not grp:
                 continue
-            per_group.setdefault(grp, {})[sc] = sales
+            sales = vals["income_total"] or vals["actual_income"]
+            if sales:
+                per_group.setdefault(grp, {})[sc] = sales
         if not per_group:
             continue
 
-        year, mon = int(ym[:4]), int(ym[5:7])
-        elapsed, days_in_m = _elapsed_days_in_month(
-            year, mon, sub_start, sub_end, today,
-        )
-        if elapsed <= 0 or days_in_m <= 0:
-            continue
-
+        days_in_m = calendar.monthrange(d.year, d.month)[1]
+        dept_groups = dept_day_group_sales.get(d, {})
         for grp, shops in per_group.items():
             amount = monthly_costs.get((grp, ym), 0.0)
             if amount <= 0:
                 continue
-            grp_sales = sum(shops.values())
-            if grp_sales <= 0:
-                continue  # 零销售月 → 不扣（用户决策）
-            daily_dept = amount / days_in_m
-            burden = daily_dept * elapsed
+            dept_sales = dept_groups.get(grp, 0.0)
+            if dept_sales <= 0:
+                continue  # 零销售 → 不扣（用户决策）
+            daily_cost = amount / days_in_m
             for sc, sales in shops.items():
-                out[sc] = out.get(sc, 0.0) + burden * (sales / grp_sales)
+                out[sc] = out.get(sc, 0.0) + daily_cost * (sales / dept_sales)
     return out
+
+
+async def _load_dept_day_group_sales(
+    session: AsyncSession,
+    tenant_id: int,
+    fee_groups_in_scope: list[str],
+    monthly_costs: dict[tuple[str, str], float],
+    start: date,
+    end: date,
+    scope_owners: list[str] | None,
+) -> dict[date, dict[str, float]]:
+    """Fetch + reduce the department-wide per-(day, group) sales denominator.
+
+    Returns {} (→ nothing to apportion) when there are no in-scope groups or
+    no configured monthly cost, so callers never pay for the extra query when
+    no deduction would happen anyway. The sales query drops the owner /
+    category / shop-picker filters (so the denominator is the whole group)
+    but KEEPS `scope_owners` (data isolation must never be bypassed).
+    """
+    if not fee_groups_in_scope or not monthly_costs:
+        return {}
+    dept_shop_groups = await dept_shops_for_groups(
+        session, tenant_id, fee_groups_in_scope,
+    )
+    dept_codes = list(dept_shop_groups.keys())
+    if not dept_codes:
+        return {}
+    dept_daily = await _daily_aggregates_by_shop(
+        session, tenant_id, start, end,
+        dept_codes, None, None, scope_owners,
+    )
+    return _dept_day_group_sales(dept_daily, dept_shop_groups)
 
 
 # ---------------------------------------------------------------------------
@@ -577,10 +647,19 @@ async def get_kpis(
         session, tenant_id, fee_groups_in_scope,
     ) if fee_groups_in_scope else {}
 
+    # Department-wide denominator: ALL shops in the in-scope fee groups, over
+    # the SAME range as `daily`, but WITHOUT the owner/category/shop-picker
+    # filters (data-scope IS still honoured). Only fetched when there's an
+    # actual cost to apportion — otherwise deductions are all 0 anyway.
+    dept_dgs = await _load_dept_day_group_sales(
+        session, tenant_id, fee_groups_in_scope, monthly_costs,
+        prev_start, end_date, scope_owners,
+    )
+
     def _kpi_for(sub_start: date, sub_end: date) -> dict[str, float]:
         per_shop = _sum_range_by_shop(daily, sub_start, sub_end)
         fixed = _compute_fixed_cost_deductions(
-            daily, sub_start, sub_end, shop_groups, monthly_costs, today,
+            daily, dept_dgs, sub_start, sub_end, shop_groups, monthly_costs, today,
         )
         return _kpis_from_per_shop(per_shop, tax_rates, fixed)
 
@@ -655,15 +734,20 @@ async def get_trend(
         session, tenant_id, fee_groups_in_scope,
     ) if fee_groups_in_scope else {}
 
+    dept_dgs = await _load_dept_day_group_sales(
+        session, tenant_id, fee_groups_in_scope, monthly_costs,
+        start_date, end_date, scope_owners,
+    )
+
     buckets = _enumerate_buckets(start_date, end_date, granularity)
     points = []
     for b_start, b_end, label in buckets:
         bucket_per_shop = _sum_range_by_shop(daily, b_start, b_end)
-        # Per-bucket apportionment: each bucket gets ONLY the portion of
-        # its containing month(s) burden that falls inside the bucket's
-        # date range. Day bucket → 1/days_in_month of that month's cost.
+        # Per-bucket apportionment: each bucket is a sum of its days' per-day
+        # apportioned costs, so day/week/month buckets always reconcile with
+        # the overview (which is just the sum over the full range).
         bucket_fixed = _compute_fixed_cost_deductions(
-            daily, b_start, b_end, shop_groups, monthly_costs, today,
+            daily, dept_dgs, b_start, b_end, shop_groups, monthly_costs, today,
         )
         bucket_kpi = _kpis_from_per_shop(bucket_per_shop, tax_rates, bucket_fixed)
         points.append({"date": label, "value": bucket_kpi[metric]})
@@ -739,11 +823,19 @@ async def get_category_breakdown(
         session, tenant_id, fee_groups_in_scope,
     ) if fee_groups_in_scope else {}
 
+    # One denominator map spanning prev_start..end_date covers both the
+    # current and previous sub-ranges (it's keyed by date; the deduction
+    # function clips to each sub-window).
+    dept_dgs = await _load_dept_day_group_sales(
+        session, tenant_id, fee_groups_in_scope, monthly_costs,
+        prev_start, end_date, scope_owners,
+    )
+
     def _shop_full_fixed_and_sales(daily, sub_start, sub_end):
         """Pre-compute per-shop full fixed cost AND per-shop total sales
         across the sub-range — both needed to allocate to categories."""
         fixed = _compute_fixed_cost_deductions(
-            daily, sub_start, sub_end, shop_groups, monthly_costs, today,
+            daily, dept_dgs, sub_start, sub_end, shop_groups, monthly_costs, today,
         )
         per_shop = _sum_range_by_shop(daily, sub_start, sub_end)
         sales_total = {
