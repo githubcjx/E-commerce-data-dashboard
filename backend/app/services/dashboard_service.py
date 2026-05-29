@@ -538,6 +538,9 @@ def _kpis_from_per_shop(
         "profitRate": pct(profit, gmv),
         "companyProfitRate": pct(adj_profit_total, gmv),
         "grossMargin": pct(gmv - cost, gmv),
+        # 成本率 = 成本总额 / 销售额. Used by the 类目汇总 table (replaces the
+        # 毛利率 column there); KPI cards still use grossMargin above.
+        "costRate": pct(cost, gmv),
         "refundRate": pct(refund, gmv),
         "shipPct": pct(total["shipping_cost"], gmv),
         "adPct": pct(total["marketing_cost"], gmv),
@@ -901,7 +904,7 @@ async def get_category_breakdown(
             "profit_prev": prev_kpi.get("profit", 0.0),
             "profit_delta_pct": _delta_pct(kpi["profit"], prev_kpi.get("profit", 0.0)),
             "company_profit_rate": kpi["companyProfitRate"],
-            "gross_margin": kpi["grossMargin"],
+            "cost_rate": kpi["costRate"],
             "refund_rate": kpi["refundRate"],
             "ship_pct": kpi["shipPct"],
         })

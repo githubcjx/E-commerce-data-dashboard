@@ -76,8 +76,8 @@ function delta(v) {
           <th style="cursor:pointer" @click="sortBy('company_profit_rate')">
             公司利润率 <span class="sort-mark">{{ arrow("company_profit_rate") }}</span>
           </th>
-          <th style="cursor:pointer" @click="sortBy('gross_margin')">
-            毛利率 <span class="sort-mark">{{ arrow("gross_margin") }}</span>
+          <th style="cursor:pointer" @click="sortBy('cost_rate')">
+            成本率 <span class="sort-mark">{{ arrow("cost_rate") }}</span>
           </th>
           <th style="cursor:pointer" @click="sortBy('refund_rate')">
             发货退款率 <span class="sort-mark">{{ arrow("refund_rate") }}</span>
@@ -102,7 +102,7 @@ function delta(v) {
             {{ delta(r.profit_delta_pct).text }}
           </td>
           <td :class="r.company_profit_rate < 0 ? 't-neg' : ''">{{ formatValue(r.company_profit_rate, "percent") }}</td>
-          <td>{{ formatValue(r.gross_margin, "percent") }}</td>
+          <td>{{ formatValue(r.cost_rate, "percent") }}</td>
           <td :class="r.refund_rate >= 40 ? 't-neg' : ''">{{ formatValue(r.refund_rate, "percent") }}</td>
           <td>{{ formatValue(r.ship_pct, "percent") }}</td>
         </tr>
