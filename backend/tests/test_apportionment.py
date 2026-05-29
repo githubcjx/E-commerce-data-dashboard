@@ -23,12 +23,15 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
+import inspect
+
 import pytest
 
 from app.services.dashboard_service import (
     _compute_fixed_cost_deductions,
     _dept_day_group_sales,
     _kpis_from_per_shop,
+    _load_dept_day_group_sales,
     _ym,
 )
 from app.api.shops import _enumerate_months
@@ -144,6 +147,25 @@ def test_dept_day_group_sales_buckets_by_day_and_group():
     assert dgs[d2]["deptA"] == pytest.approx(50.0)
     # shopX never contributes a group entry.
     assert all("deptA" == g for day in dgs.values() for g in day)
+
+
+def test_denominator_query_ignores_scope_owners():
+    """REGRESSION: the fixed-cost denominator must NOT be restricted by the
+    viewer's data scope. If `_load_dept_day_group_sales` ever takes a
+    `scope_owners` param again, the per-(day, group) denominator would shrink
+    to the rows a tenant_user can see — so the same person's apportioned
+    fixed-cost share (and thus 公司利润率) would differ between an admin and
+    a scoped普通用户 viewing the identical filter. The denominator is an
+    objective company fact; it stays whole-department regardless of who looks.
+
+    We assert it at the signature level because the DB query itself needs a
+    live session this pure-function suite doesn't have — but the contract
+    'no scope_owners reaches the denominator' is exactly what we must lock.
+    """
+    params = inspect.signature(_load_dept_day_group_sales).parameters
+    assert "scope_owners" not in params, (
+        "fixed-cost denominator must not be scoped by viewer data permissions"
+    )
 
 
 # ---------------------------------------------------------------------------

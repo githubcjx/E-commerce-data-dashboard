@@ -376,15 +376,25 @@ async def _load_dept_day_group_sales(
     monthly_costs: dict[tuple[str, str], float],
     start: date,
     end: date,
-    scope_owners: list[str] | None,
 ) -> dict[date, dict[str, float]]:
     """Fetch + reduce the department-wide per-(day, group) sales denominator.
 
     Returns {} (→ nothing to apportion) when there are no in-scope groups or
     no configured monthly cost, so callers never pay for the extra query when
-    no deduction would happen anyway. The sales query drops the owner /
-    category / shop-picker filters (so the denominator is the whole group)
-    but KEEPS `scope_owners` (data isolation must never be bypassed).
+    no deduction would happen anyway.
+
+    This denominator drops EVERY user-facing restriction — the owner /
+    category / shop-picker filters AND `scope_owners` (the per-user data
+    scope). The fixed cost is an objective company fact: the whole fee
+    group spent X this month and it is apportioned against the whole group's
+    real sales. If `scope_owners` shrank this denominator, the same person's
+    apportioned share would change depending on WHO is viewing the dashboard
+    — a tenant_user scoped to themselves would see the denominator collapse
+    to their own sales, inflating their share and lowering their
+    公司利润率 below what an admin sees for the identical filter. (That was
+    the reported bug.) Data isolation is NOT bypassed: this query only ever
+    produces aggregate per-(day, group) totals — never row-level detail — and
+    stays strictly within `tenant_id`.
     """
     if not fee_groups_in_scope or not monthly_costs:
         return {}
@@ -396,7 +406,7 @@ async def _load_dept_day_group_sales(
         return {}
     dept_daily = await _daily_aggregates_by_shop(
         session, tenant_id, start, end,
-        dept_codes, None, None, scope_owners,
+        dept_codes, None, None, None,  # no owner/cat/shop filter, no scope_owners
     )
     return _dept_day_group_sales(dept_daily, dept_shop_groups)
 
@@ -652,12 +662,14 @@ async def get_kpis(
     ) if fee_groups_in_scope else {}
 
     # Department-wide denominator: ALL shops in the in-scope fee groups, over
-    # the SAME range as `daily`, but WITHOUT the owner/category/shop-picker
-    # filters (data-scope IS still honoured). Only fetched when there's an
-    # actual cost to apportion — otherwise deductions are all 0 anyway.
+    # the SAME range as `daily`, but WITHOUT any user-facing restriction
+    # (owner/category/shop-picker filters AND scope_owners). The fixed cost
+    # is apportioned against the whole group's real sales so the result is
+    # identical no matter who views it. Only fetched when there's an actual
+    # cost to apportion — otherwise deductions are all 0 anyway.
     dept_dgs = await _load_dept_day_group_sales(
         session, tenant_id, fee_groups_in_scope, monthly_costs,
-        prev_start, end_date, scope_owners,
+        prev_start, end_date,
     )
 
     def _kpi_for(sub_start: date, sub_end: date) -> dict[str, float]:
@@ -740,7 +752,7 @@ async def get_trend(
 
     dept_dgs = await _load_dept_day_group_sales(
         session, tenant_id, fee_groups_in_scope, monthly_costs,
-        start_date, end_date, scope_owners,
+        start_date, end_date,
     )
 
     buckets = _enumerate_buckets(start_date, end_date, granularity)
@@ -832,7 +844,7 @@ async def get_category_breakdown(
     # function clips to each sub-window).
     dept_dgs = await _load_dept_day_group_sales(
         session, tenant_id, fee_groups_in_scope, monthly_costs,
-        prev_start, end_date, scope_owners,
+        prev_start, end_date,
     )
 
     def _shop_full_fixed_and_sales(daily, sub_start, sub_end):
