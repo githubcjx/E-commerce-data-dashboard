@@ -23,9 +23,21 @@ npm install
 npm run dev                            # Vite on :9586, proxies /api → :8000
 npm run build                          # → dist/ (also emits dist/version.json for the update-banner poll)
 
-# Full stack via Docker
-docker compose up -d --build           # db + backend + frontend; frontend on 127.0.0.1:8080
+# Full stack via Docker — LOCAL ONLY (db + backend + frontend, no caddy; frontend on 127.0.0.1:8080)
+docker compose up -d --build
 ```
+
+### Deployment (production)
+
+**Always give the user the full production command — never the bare `docker compose up -d --build`.** Prod stacks the base compose file with `deploy/docker-compose.prod.yml`, which adds the **caddy** container (public reverse proxy + auto-HTTPS). Omitting `-f deploy/docker-compose.prod.yml` drops caddy and the site becomes unreachable from the internet. The server lives at `/opt/ec-dashboard`.
+
+```bash
+cd /opt/ec-dashboard
+sudo git pull
+sudo docker compose -f docker-compose.yml -f deploy/docker-compose.prod.yml up -d --build
+```
+
+The trailing `up -d --build` (no service name) rebuilds everything; unchanged containers (db, caddy) are left as-is. You *can* limit the rebuild to one service (`... up -d --build frontend`), but only when you're certain the change touched just that side — a frontend-only rebuild against an unchanged backend will break if the API contract changed. When unsure, rebuild everything. A change that touches both `backend/` and `frontend/` (e.g. adding an API field the UI reads) **must** rebuild both.
 
 Tests are **pure-function** tests with no DB — `conftest.py` points `DATABASE_URL` at in-memory SQLite just so the import chain (`app.db`) loads. Don't add DB fixtures expecting a real Postgres.
 
