@@ -6,10 +6,12 @@ import {
 import { listDepartments } from "../api/departments";
 
 // 8 metrics. companyProfitRate is new; refundRate keeps the same key but its
-// display label changes to 发货退款率 (label comes from the API).
+// display label changes to 发货退款率 (label comes from the API). costRate
+// (成本率) replaced the old grossMargin (毛利率) card — saved layouts that
+// still reference "grossMargin" are migrated in loadLayout().
 const DEFAULT_ORDER = [
   "sales", "profit", "profitRate", "companyProfitRate",
-  "grossMargin", "refundRate", "shipPct", "adPct",
+  "costRate", "refundRate", "shipPct", "adPct",
 ];
 const DEFAULT_SECTIONS = ["trend", "categoryTable"];
 
@@ -205,7 +207,11 @@ export const useDashboardStore = defineStore("dashboard", {
         const parsed = JSON.parse(data.layout_json);
         if (Array.isArray(parsed.order)) {
           const known = new Set(DEFAULT_ORDER);
-          const cleaned = parsed.order.filter((k) => known.has(k));
+          // Migrate renamed metric keys in-place so a saved layout keeps the
+          // card's original position instead of dropping the old key and
+          // appending the new one at the end. grossMargin (毛利率) → costRate.
+          const migrated = parsed.order.map((k) => (k === "grossMargin" ? "costRate" : k));
+          const cleaned = migrated.filter((k) => known.has(k));
           const missing = DEFAULT_ORDER.filter((k) => !cleaned.includes(k));
           this.panelOrder = [...cleaned, ...missing];
         }

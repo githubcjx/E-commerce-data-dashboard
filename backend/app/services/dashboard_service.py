@@ -85,7 +85,9 @@ METRIC_DEFS: list[MetricDef] = [
     MetricDef("profit", "利润额", "currency", True),
     MetricDef("profitRate", "经营利润率", "percent", True),
     MetricDef("companyProfitRate", "公司利润率", "percent", True),
-    MetricDef("grossMargin", "毛利率", "percent", True),
+    # 成本率 = 成本总额 / 销售额 (lower is better). Replaced the old 毛利率
+    # KPI card; the value comes from _kpis_from_per_shop's "costRate".
+    MetricDef("costRate", "成本率", "percent", False),
     MetricDef("refundRate", "发货退款率", "percent", False),
     MetricDef("shipPct", "快递费用占比", "percent", False),
     MetricDef("adPct", "营销费用占比", "percent", False),
@@ -537,9 +539,8 @@ def _kpis_from_per_shop(
         "profit": profit,
         "profitRate": pct(profit, gmv),
         "companyProfitRate": pct(adj_profit_total, gmv),
-        "grossMargin": pct(gmv - cost, gmv),
-        # 成本率 = 成本总额 / 销售额. Used by the 类目汇总 table (replaces the
-        # 毛利率 column there); KPI cards still use grossMargin above.
+        # 成本率 = 成本总额 / 销售额 (lower is better). Used by both the KPI
+        # cards and the 类目汇总 table — replaced the old 毛利率 (gmv−cost)/gmv.
         "costRate": pct(cost, gmv),
         "refundRate": pct(refund, gmv),
         "shipPct": pct(total["shipping_cost"], gmv),

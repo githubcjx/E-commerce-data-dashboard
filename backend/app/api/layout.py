@@ -9,7 +9,7 @@ from ..security import get_current_user
 
 router = APIRouter(prefix="/api/layout", tags=["layout"])
 
-DEFAULT_LAYOUT_JSON = '{"order":["sales","refundRate","grossMargin","profit","profitRate","shipPct","adPct"],"sections":["trend","categoryTable"]}'
+DEFAULT_LAYOUT_JSON = '{"order":["sales","refundRate","costRate","profit","profitRate","shipPct","adPct"],"sections":["trend","categoryTable"]}'
 
 
 def _tenant_for(user: User) -> int:
