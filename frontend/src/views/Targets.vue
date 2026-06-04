@@ -36,6 +36,8 @@ function compClass(d) {
   if (d >= 0.8) return "warn";
   return "low";
 }
+const achieved = (c) => c !== null && c !== undefined && c >= 1;
+const marginHit = (r) => r.target_profit_rate > 0 && r.actual_profit_rate >= r.target_profit_rate;
 
 async function loadGrid() {
   loading.value = true;
@@ -145,13 +147,23 @@ watch(ym, reload);
                        v-model.number="r.target_sales" :disabled="!canEdit" />
               </td>
               <td class="ro">{{ formatCurrency(r.actual_sales) }}</td>
-              <td><span :class="['pill', compClass(r.sales_completion)]">{{ pct(r.sales_completion) }}</span></td>
+              <td>
+                <span class="comp">
+                  <span :class="['pill', compClass(r.sales_completion)]">{{ pct(r.sales_completion) }}</span>
+                  <span v-if="achieved(r.sales_completion)" class="check" title="已达成"><svg viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5" /></svg></span>
+                </span>
+              </td>
               <td>
                 <input class="num" type="number" step="0.01"
                        v-model.number="r.target_profit" :disabled="!canEdit" />
               </td>
               <td class="ro">{{ formatCurrency(r.actual_profit) }}</td>
-              <td><span :class="['pill', compClass(r.profit_completion)]">{{ pct(r.profit_completion) }}</span></td>
+              <td>
+                <span class="comp">
+                  <span :class="['pill', compClass(r.profit_completion)]">{{ pct(r.profit_completion) }}</span>
+                  <span v-if="achieved(r.profit_completion)" class="check" title="已达成"><svg viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5" /></svg></span>
+                </span>
+              </td>
               <td>
                 <div class="rate-input">
                   <input class="num" type="number" step="0.1"
@@ -159,7 +171,12 @@ watch(ym, reload);
                   <span class="suffix">%</span>
                 </div>
               </td>
-              <td class="ro">{{ pct(r.actual_profit_rate) }}</td>
+              <td class="ro">
+                <span class="comp">
+                  {{ pct(r.actual_profit_rate) }}
+                  <span v-if="marginHit(r)" class="check" title="已达标"><svg viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5" /></svg></span>
+                </span>
+              </td>
             </tr>
           </tbody>
         </table>
@@ -177,6 +194,7 @@ watch(ym, reload);
             <span class="rank-owner">{{ r.owner }}</span>
             <span class="rank-sub mono">{{ formatCurrency(r.actual_sales) }} / {{ formatCurrency(r.target_sales) }}</span>
             <span :class="['rank-pct', compClass(r.sales_completion)]">{{ pct(r.sales_completion) }}</span>
+            <span v-if="achieved(r.sales_completion)" class="check" title="已达成"><svg viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5" /></svg></span>
           </li>
         </ol>
       </div>
@@ -189,6 +207,7 @@ watch(ym, reload);
             <span class="rank-owner">{{ r.owner }}</span>
             <span class="rank-sub mono">{{ formatCurrency(r.actual_profit) }} / {{ formatCurrency(r.target_profit) }}</span>
             <span :class="['rank-pct', compClass(r.profit_completion)]">{{ pct(r.profit_completion) }}</span>
+            <span v-if="achieved(r.profit_completion)" class="check" title="已达成"><svg viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5" /></svg></span>
           </li>
         </ol>
       </div>
@@ -202,7 +221,7 @@ watch(ym, reload);
 .page-title { font-size: 20px; font-weight: 600; color: var(--ink); margin: 0; }
 .page-sub { font-size: 13px; color: var(--ink-3); margin: 6px 0 0; }
 .month-pick { font-size: 13px; color: var(--ink-3); display: inline-flex; align-items: center; gap: 8px; }
-.month-pick input { font-family: inherit; font-size: 13px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--ink); }
+.month-pick input { font-family: inherit; font-size: 14px; padding: 7px 9px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--ink); }
 
 .tabs-row { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
 .seg { appearance: none; border: 1px solid var(--border); background: var(--surface); padding: 7px 14px; border-radius: 999px; font-family: inherit; font-size: 13px; color: var(--ink-2); cursor: pointer; }
@@ -210,39 +229,43 @@ watch(ym, reload);
 .spacer { flex: 1; }
 
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
-.card-title { font-size: 14px; font-weight: 600; margin: 0 0 12px; color: var(--ink); }
+.card-title { font-size: 15px; font-weight: 600; margin: 0 0 12px; color: var(--ink); }
 .readonly-hint { font-size: 12.5px; color: var(--ink-3); background: var(--bg-elev); padding: 8px 12px; border-radius: 8px; margin-bottom: 12px; }
-.empty { padding: 32px; text-align: center; color: var(--ink-3); font-size: 13px; }
+.empty { padding: 32px; text-align: center; color: var(--ink-3); font-size: 13.5px; }
 
 .table-wrap { overflow-x: auto; }
-.grid { border-collapse: collapse; width: 100%; min-width: 880px; font-size: 13px; }
-.grid th, .grid td { padding: 8px 10px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--divider); }
-.grid th { font-weight: 500; color: var(--ink-3); font-size: 12px; text-align: right; }
+.grid { border-collapse: collapse; width: 100%; min-width: 960px; font-size: 14px; }
+.grid th, .grid td { padding: 9px 11px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--divider); }
+.grid th { font-weight: 500; color: var(--ink-3); font-size: 12.5px; text-align: right; }
 .grid th:first-child, .grid td:first-child { text-align: left; }
 .sticky-l { position: sticky; left: 0; background: var(--surface); z-index: 1; }
-.owner { font-weight: 500; color: var(--ink); }
-.ro { color: var(--ink-2); font-variant-numeric: tabular-nums; }
-.num { width: 110px; text-align: right; font-family: inherit; font-size: 13px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); color: var(--ink); font-variant-numeric: tabular-nums; }
+.owner { font-weight: 600; color: var(--ink); font-size: 14.5px; }
+.ro { color: var(--ink-2); font-variant-numeric: tabular-nums; font-size: 14px; font-weight: 500; }
+.num { width: 116px; text-align: right; font-family: inherit; font-size: 14px; padding: 6px 9px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); color: var(--ink); font-variant-numeric: tabular-nums; }
 .num:disabled { background: var(--bg-elev); color: var(--ink-2); }
 .rate-input { display: inline-flex; align-items: center; gap: 4px; }
-.rate-input .num { width: 72px; }
-.suffix { color: var(--ink-3); font-size: 12px; }
+.rate-input .num { width: 78px; }
+.suffix { color: var(--ink-3); font-size: 12.5px; }
 
-.pill { display: inline-block; min-width: 56px; text-align: center; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-variant-numeric: tabular-nums; }
+/* completion pill + 达成 ✓ */
+.comp { display: inline-flex; align-items: center; gap: 6px; }
+.pill { display: inline-block; min-width: 62px; text-align: center; padding: 3px 10px; border-radius: 999px; font-size: 13px; font-weight: 500; font-variant-numeric: tabular-nums; }
 .pill.ok { background: rgba(16, 185, 129, 0.14); color: #047857; }
 .pill.warn { background: rgba(245, 158, 11, 0.16); color: #b45309; }
 .pill.low { background: rgba(239, 68, 68, 0.13); color: #b91c1c; }
 .pill.muted { background: var(--bg-elev); color: var(--ink-3); }
+.check { display: inline-grid; place-items: center; width: 19px; height: 19px; border-radius: 999px; background: #10b981; flex: none; box-shadow: 0 1px 3px rgba(16, 185, 129, 0.4); }
+.check svg { width: 12px; height: 12px; stroke: #fff; stroke-width: 3.4; fill: none; stroke-linecap: round; stroke-linejoin: round; }
 
 .rank-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 @media (max-width: 760px) { .rank-grid { grid-template-columns: 1fr; } }
 .rank-list { list-style: none; margin: 0; padding: 0; }
-.rank-list li { display: flex; align-items: center; gap: 10px; padding: 9px 4px; border-bottom: 1px solid var(--divider); }
-.rank-no { width: 22px; height: 22px; flex: none; display: grid; place-items: center; border-radius: 6px; font-size: 12px; font-weight: 600; color: var(--ink-3); background: var(--bg-elev); }
+.rank-list li { display: flex; align-items: center; gap: 10px; padding: 11px 4px; border-bottom: 1px solid var(--divider); }
+.rank-no { width: 24px; height: 24px; flex: none; display: grid; place-items: center; border-radius: 6px; font-size: 13px; font-weight: 600; color: var(--ink-3); background: var(--bg-elev); }
 .rank-no.top { background: var(--ink); color: #fff; }
-.rank-owner { font-size: 13.5px; color: var(--ink); font-weight: 500; }
-.rank-sub { margin-left: auto; font-size: 11.5px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
-.rank-pct { width: 64px; text-align: right; font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.rank-owner { font-size: 15px; color: var(--ink); font-weight: 600; }
+.rank-sub { margin-left: auto; font-size: 12.5px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.rank-pct { width: 68px; text-align: right; font-size: 15.5px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .rank-pct.ok { color: #047857; }
 .rank-pct.warn { color: #b45309; }
 .rank-pct.low { color: #b91c1c; }

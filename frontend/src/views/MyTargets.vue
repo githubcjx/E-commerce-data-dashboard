@@ -145,7 +145,10 @@ watch(ym, load);
 .empty { padding: 64px; text-align: center; color: var(--ink-3); font-size: 14px; }
 
 /* roomier grid + cards */
-.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 22px; }
+/* auto-fit (not auto-fill): with 1–2 cards they STRETCH to fill the row instead
+   of leaving empty tracks; the page's 1280px max-width caps the grid at 3
+   columns, and it drops to 2 / 1 columns responsively as the viewport narrows. */
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 22px; }
 .card {
   position: relative; background: var(--surface); border: 1px solid var(--border);
   border-radius: 16px; padding: 24px 24px 22px; overflow: hidden;
