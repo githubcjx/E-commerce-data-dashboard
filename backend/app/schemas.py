@@ -310,3 +310,19 @@ class KpiItem(BaseModel):
 
 class LayoutPayload(BaseModel):
     layout_json: str
+
+
+# ---------- Performance targets ----------
+
+class TargetSaveItem(BaseModel):
+    owner: str = Field(..., min_length=1, max_length=100)
+    target_sales: float = Field(default=0, ge=0)
+    target_profit: float = 0
+    # 目标利润率 as a decimal (0.15 = 15%).
+    target_profit_rate: float = 0
+
+
+class TargetSave(BaseModel):
+    """Batch upsert for one month's 人员目标 — atomic (all rows in one tx)."""
+    year_month: str = Field(..., pattern=r"^\d{4}-\d{2}$")
+    items: list[TargetSaveItem] = Field(default_factory=list)

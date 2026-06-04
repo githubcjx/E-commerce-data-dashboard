@@ -15,6 +15,8 @@ const updatedAt = computed(() => {
 const isDashboard = computed(() => route.name === "dashboard");
 const isImport = computed(() => route.name === "import");
 const isAdminPage = computed(() => route.name === "tenants" || route.name === "users-admin");
+const isTargets = computed(() => route.name === "targets");
+const isMyTargets = computed(() => route.name === "my-targets");
 
 const menuOpen = ref(false);
 
@@ -60,6 +62,18 @@ function gotoAdmin() {
         <span class="status-dot" />
         <span>数据更新于 {{ updatedAt }}</span>
         <span class="topbar-divider" />
+        <button
+          v-if="userStore.isAdmin && !userStore.isPlatformAdmin"
+          :class="['btn sm', { primary: isTargets }]"
+          @click="router.push({ name: 'targets' })"
+          title="人员目标完成情况"
+        >目标管理</button>
+        <button
+          v-if="userStore.user?.role === 'tenant_user'"
+          :class="['btn sm', { primary: isMyTargets }]"
+          @click="router.push({ name: 'my-targets' })"
+          title="我的目标达成"
+        >我的目标</button>
         <button
           v-if="userStore.isAdmin"
           :class="['btn sm', { primary: isAdminPage }]"

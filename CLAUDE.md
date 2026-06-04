@@ -14,7 +14,7 @@ There is **no `venv`** — backend runs on the global Python (`python` / `Python
 # Backend (cwd = backend/)
 pip install -r requirements.txt
 uvicorn app.main:app --reload          # serves :8000; auto-creates tables + bootstraps platform admin on startup
-python -m pytest                       # full suite (currently only test_apportionment.py)
+python -m pytest                       # full suite (test_apportionment.py + test_targets.py)
 python -m pytest tests/test_apportionment.py::test_canonical_user_example -v   # single test
 python -c "import py_compile; py_compile.compile(r'app\services\dashboard_service.py', doraise=True)"  # quick syntax check
 
@@ -39,7 +39,7 @@ sudo docker compose -f docker-compose.yml -f deploy/docker-compose.prod.yml up -
 
 The trailing `up -d --build` (no service name) rebuilds everything; unchanged containers (db, caddy) are left as-is. You *can* limit the rebuild to one service (`... up -d --build frontend`), but only when you're certain the change touched just that side — a frontend-only rebuild against an unchanged backend will break if the API contract changed. When unsure, rebuild everything. A change that touches both `backend/` and `frontend/` (e.g. adding an API field the UI reads) **must** rebuild both.
 
-Tests are **pure-function** tests with no DB — `conftest.py` points `DATABASE_URL` at in-memory SQLite just so the import chain (`app.db`) loads. Don't add DB fixtures expecting a real Postgres.
+Two test styles: `test_apportionment.py` is **pure-function** (dict-shaped inputs, no DB) — `conftest.py` points `DATABASE_URL` at in-memory SQLite just so the import chain (`app.db`) loads. `test_targets.py` is **SQLite-backed**: each test spins up its OWN in-memory async engine (`create_async_engine(... StaticPool)`) + `create_all`, seeds rows, and drives the async service/endpoints via `asyncio.run` (the suite has no `pytest-asyncio` dep). That's the right pattern for DB-backed logic — just don't add fixtures expecting a real Postgres.
 
 ### Migrations
 

@@ -325,3 +325,54 @@ class DashboardLayout(Base):
     )
     layout_json: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class PerformanceTarget(Base):
+    """Per-月、per-负责人 业绩目标 (人员目标完成情况).
+
+    The SUBJECT is the 负责人 (owner) name — the same free-text field on
+    sales_records.owner that data_scope_owners filters on — NOT the login
+    account. A 普通用户 sees the targets for the owners in their data scope;
+    rankings are over 负责人, so a person with no login account still ranks.
+
+    Stores ONLY the targets; the 完成率 are computed at query time by
+    dividing the month's actual 经营 sales/profit (per owner) by these
+    targets — so rankings stay live and can't drift from hand-typed numbers.
+
+    One row = (tenant, owner, "YYYY-MM"). Rates are decimals (0.15 = 15%),
+    matching the repo-wide convention. A brand-new table — created by
+    create_all on startup, so no migrate script is needed.
+    """
+    __tablename__ = "performance_targets"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "owner", "year_month",
+            name="uq_perf_target_tenant_owner_month",
+        ),
+        Index("ix_perf_target_tenant_month", "tenant_id", "year_month"),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
+    tenant_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    owner: Mapped[str] = mapped_column(String(100), nullable=False)
+    # CHAR(7) "YYYY-MM" — same convention as fee_group_monthly_cost.
+    year_month: Mapped[str] = mapped_column(String(7), nullable=False)
+
+    target_sales: Mapped[Decimal] = mapped_column(
+        Numeric(18, 4), nullable=False, default=Decimal("0"), server_default="0",
+    )
+    target_profit: Mapped[Decimal] = mapped_column(
+        Numeric(18, 4), nullable=False, default=Decimal("0"), server_default="0",
+    )
+    # 目标利润率, decimal (0.15 = 15%).
+    target_profit_rate: Mapped[Decimal] = mapped_column(
+        Numeric(20, 6), nullable=False, default=Decimal("0"), server_default="0",
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

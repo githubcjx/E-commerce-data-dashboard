@@ -42,6 +42,9 @@ export const useUserStore = defineStore("user", {
       if (r === ROLE_TENANT_ADMIN) return !!s.user?.can_manage_scope;
       return false;
     },
+    // Who may EDIT 人员业绩目标 — super_admin (or platform_admin acting in a
+    // tenant). Plain tenant_admin can view rankings but not edit targets.
+    canEditTargets: (s) => s.user?.role === ROLE_PLATFORM || s.user?.role === ROLE_TENANT_SUPER,
   },
   actions: {
     async login(username, password) {

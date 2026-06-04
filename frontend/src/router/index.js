@@ -28,6 +28,19 @@ const routes = [
     component: () => import("../views/Admin.vue"),
     meta: { requiresAdmin: true },
   },
+  {
+    // 人员目标完成情况 — admin manage + ranking (edit gated to super in-page).
+    path: "/targets",
+    name: "targets",
+    component: () => import("../views/Targets.vue"),
+    meta: { requiresAdmin: true },
+  },
+  {
+    // 普通用户 self-view of their own goal progress.
+    path: "/my-targets",
+    name: "my-targets",
+    component: () => import("../views/MyTargets.vue"),
+  },
   // Convenience: /admin auto-routes by role
   { path: "/admin", redirect: () => {
       const u = getStoredUser();
@@ -61,8 +74,8 @@ router.beforeEach((to) => {
       return { name: "dashboard" };
     }
   }
-  // Platform admin has no tenant data — keep them out of the dashboard/import views.
-  if (u?.role === ROLE_PLATFORM && (to.name === "dashboard" || to.name === "import")) {
+  // Platform admin has no tenant data — keep them out of tenant-scoped views.
+  if (u?.role === ROLE_PLATFORM && ["dashboard", "import", "targets", "my-targets"].includes(to.name)) {
     return { name: "tenants" };
   }
 });
