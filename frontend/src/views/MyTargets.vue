@@ -1,6 +1,6 @@
 <script setup>
 import { onMounted, ref, watch } from "vue";
-import { fetchMyTargets } from "../api/targets";
+import { fetchMyTargets, saveMyTargets } from "../api/targets";
 import { useUiStore } from "../stores/ui";
 import { formatCurrency } from "../utils/format";
 
@@ -12,6 +12,8 @@ function currentYm() {
 }
 const ym = ref(currentYm());
 const loading = ref(false);
+const saving = ref(false);
+const editing = ref(false);
 const rows = ref([]);
 
 function pct(d) {
@@ -30,8 +32,6 @@ function statusClass(d) {
 const achieved = (c) => c !== null && c !== undefined && c >= 1;
 const marginHit = (r) => r.target_profit_rate > 0 && r.actual_profit_rate >= r.target_profit_rate;
 
-// Count, per owner, how many of the (set) targets are achieved — drives the
-// header chip and the "all done" celebratory accent.
 function summarize(r) {
   let set = 0, hit = 0;
   if (r.target_sales > 0) { set++; if (achieved(r.sales_completion)) hit++; }
@@ -44,7 +44,12 @@ async function load() {
   loading.value = true;
   try {
     const data = await fetchMyTargets(ym.value);
-    rows.value = (data.rows || []).map((r) => ({ ...r, _sum: summarize(r) }));
+    rows.value = (data.rows || []).map((r) => ({
+      ...r,
+      _sum: summarize(r),
+      // percentage form for the 目标利润率 input (0.15 → 15)
+      _rate_pct: +(Number(r.target_profit_rate) * 100).toFixed(2),
+    }));
   } catch (e) {
     ui.showToast(e.message || "加载失败", "error");
   } finally {
@@ -52,8 +57,33 @@ async function load() {
   }
 }
 
+function startEdit() { editing.value = true; }
+async function cancelEdit() {
+  editing.value = false;
+  await load(); // discard unsaved edits
+}
+async function saveEdits() {
+  saving.value = true;
+  try {
+    const items = rows.value.map((r) => ({
+      owner: r.owner,
+      target_sales: Number(r.target_sales) || 0,
+      target_profit: Number(r.target_profit) || 0,
+      target_profit_rate: (Number(r._rate_pct) || 0) / 100,
+    }));
+    await saveMyTargets(ym.value, items);
+    ui.showToast("目标已保存", "success");
+    editing.value = false;
+    await load();
+  } catch (e) {
+    ui.showToast(e.message || "保存失败", "error");
+  } finally {
+    saving.value = false;
+  }
+}
+
 onMounted(load);
-watch(ym, load);
+watch(ym, () => { editing.value = false; load(); });
 </script>
 
 <template>
@@ -61,20 +91,53 @@ watch(ym, load);
     <div class="page-head">
       <div>
         <h1 class="page-title">我的目标达成</h1>
-        <p class="page-sub">完成率 = 当月累计实际 ÷ 当月目标，随导入数据实时更新。</p>
+        <p class="page-sub">完成率 = 当月累计实际 ÷ 当月目标，随导入数据实时更新。可自行设置本月目标。</p>
       </div>
-      <label class="month-pick">
-        月份
-        <input type="month" v-model="ym" />
-      </label>
+      <div class="head-actions">
+        <label class="month-pick">
+          月份
+          <input type="month" v-model="ym" />
+        </label>
+        <template v-if="rows.length">
+          <button v-if="!editing" class="btn sm" @click="startEdit">编辑目标</button>
+          <template v-else>
+            <button class="btn sm" :disabled="saving" @click="cancelEdit">取消</button>
+            <button class="btn sm primary" :disabled="saving" @click="saveEdits">{{ saving ? "保存中…" : "保存" }}</button>
+          </template>
+        </template>
+      </div>
     </div>
 
     <div v-if="loading" class="empty">加载中…</div>
     <div v-else-if="!rows.length" class="empty">本月暂无可查看的目标数据。</div>
 
+    <!-- 编辑模式：填写本月目标 -->
+    <div v-else-if="editing" class="cards">
+      <div v-for="r in rows" :key="r.owner" class="card edit-card">
+        <div class="card-head"><span class="owner">{{ r.owner }}</span></div>
+        <label class="field">
+          <span class="field-label">目标销售额</span>
+          <input class="num" type="number" min="0" step="0.01" v-model.number="r.target_sales" />
+        </label>
+        <label class="field">
+          <span class="field-label">目标利润额</span>
+          <input class="num" type="number" step="0.01" v-model.number="r.target_profit" />
+        </label>
+        <label class="field">
+          <span class="field-label">目标利润率</span>
+          <span class="rate-input"><input class="num" type="number" step="0.1" v-model.number="r._rate_pct" /><span class="suffix">%</span></span>
+        </label>
+        <div class="actual-hint">
+          当前实际：销售 <b class="mono">{{ formatCurrency(r.actual_sales) }}</b>
+          · 利润 <b class="mono">{{ formatCurrency(r.actual_profit) }}</b>
+          · 利润率 <b class="mono">{{ pct(r.actual_profit_rate) }}</b>
+        </div>
+      </div>
+    </div>
+
+    <!-- 查看模式 -->
     <div v-else class="cards">
       <div v-for="r in rows" :key="r.owner" :class="['card', { 'card--complete': r._sum.complete }]">
-        <!-- header: 负责人 + 达成进度 -->
         <div class="card-head">
           <span class="owner">{{ r.owner }}</span>
           <span v-if="r._sum.set" :class="['summary', { all: r._sum.complete }]">
@@ -84,7 +147,6 @@ watch(ym, load);
           <span v-else class="no-target">未设目标</span>
         </div>
 
-        <!-- 销售额 -->
         <div class="metric">
           <div class="metric-top">
             <span class="metric-label">销售额完成率</span>
@@ -100,7 +162,6 @@ watch(ym, load);
           </div>
         </div>
 
-        <!-- 利润额 -->
         <div class="metric">
           <div class="metric-top">
             <span class="metric-label">利润额完成率</span>
@@ -116,7 +177,6 @@ watch(ym, load);
           </div>
         </div>
 
-        <!-- 利润率 (实际 vs 目标，无完成率排名) -->
         <div class="metric rate-metric">
           <div class="metric-top">
             <span class="metric-label">利润率</span>
@@ -139,15 +199,13 @@ watch(ym, load);
 .page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 22px; }
 .page-title { font-size: 24px; font-weight: 700; color: var(--ink); margin: 0; letter-spacing: -0.01em; }
 .page-sub { font-size: 13.5px; color: var(--ink-3); margin: 8px 0 0; }
+.head-actions { display: flex; align-items: center; gap: 10px; }
 .month-pick { font-size: 13px; color: var(--ink-3); display: inline-flex; align-items: center; gap: 8px; }
 .month-pick input { font-family: inherit; font-size: 14px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); color: var(--ink); }
 
 .empty { padding: 64px; text-align: center; color: var(--ink-3); font-size: 14px; }
 
-/* roomier grid + cards */
-/* auto-fit (not auto-fill): with 1–2 cards they STRETCH to fill the row instead
-   of leaving empty tracks; the page's 1280px max-width caps the grid at 3
-   columns, and it drops to 2 / 1 columns responsively as the viewport narrows. */
+/* auto-fit → 1–2 cards stretch to fill the row; page max-width caps it at 3 cols. */
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 22px; }
 .card {
   position: relative; background: var(--surface); border: 1px solid var(--border);
@@ -155,7 +213,6 @@ watch(ym, load);
   transition: box-shadow 0.2s, border-color 0.2s;
 }
 .card:hover { box-shadow: var(--shadow-pop); }
-/* all targets met → green accent */
 .card--complete { border-color: rgba(16, 185, 129, 0.5); }
 .card--complete::before {
   content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 5px;
@@ -178,7 +235,6 @@ watch(ym, load);
 .metric-top { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 .metric-label { font-size: 13.5px; font-weight: 500; color: var(--ink-2); }
 
-/* the hero number — big + colored, the thing you see first */
 .hero { font-size: 40px; line-height: 1.05; font-weight: 800; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; margin: 2px 0 12px; }
 .hero.ok { color: #059669; }
 .hero.warn { color: #d97706; }
@@ -197,16 +253,26 @@ watch(ym, load);
 .metric-sub .tgt { color: var(--ink-3); font-size: 12.5px; }
 .metric-sub .mono { font-variant-numeric: tabular-nums; }
 
-/* green check badge */
 .check { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 999px; background: #10b981; flex: none; box-shadow: 0 1px 4px rgba(16, 185, 129, 0.4); }
 .check svg { width: 16px; height: 16px; stroke: #fff; stroke-width: 3.2; fill: none; stroke-linecap: round; stroke-linejoin: round; }
 
-/* 利润率 block */
 .rate-metric { padding-bottom: 2px; }
 .rate-row { display: flex; align-items: baseline; gap: 12px; margin-top: 4px; }
 .rate-actual { font-size: 30px; font-weight: 800; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; color: var(--ink); }
 .rate-actual.hit { color: #059669; }
 .rate-target { font-size: 13.5px; color: var(--ink-3); }
+
+/* ---- 编辑模式 ---- */
+.edit-card .card-head { margin-bottom: 16px; }
+.field { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; border-top: 1px solid var(--divider); }
+.field-label { font-size: 13.5px; color: var(--ink-2); font-weight: 500; }
+.num { width: 150px; text-align: right; font-family: inherit; font-size: 15px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--ink); font-variant-numeric: tabular-nums; }
+.num:focus { outline: none; border-color: var(--border-strong); }
+.rate-input { display: inline-flex; align-items: center; gap: 6px; }
+.rate-input .num { width: 96px; }
+.suffix { color: var(--ink-3); font-size: 13px; }
+.actual-hint { margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--divider); font-size: 12.5px; color: var(--ink-3); line-height: 1.7; }
+.actual-hint b { color: var(--ink-2); font-weight: 600; }
 
 @media (max-width: 540px) {
   .cards { grid-template-columns: 1fr; }

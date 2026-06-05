@@ -34,7 +34,7 @@ from app.models import (
 from app.schemas import TargetSave, TargetSaveItem
 from app.services import target_service as t
 from app.api.targets import (
-    list_targets, save_targets, my_targets,
+    list_targets, save_targets, my_targets, save_my_targets,
     ranking as ep_ranking, reminder as ep_reminder,
 )
 from app.security import require_backend_access, require_tenant_super_admin
@@ -318,6 +318,64 @@ def test_router_rejects_bad_month_and_missing_tenant():
             # reminder is gracefully quiet for platform_admin without a tenant.
             rem = await ep_reminder(tenant_id=None, actor=pa, db=s)
             assert rem.data["should_remind"] is False
+    asyncio.run(scenario())
+
+
+def test_me_put_self_service_scope_enforced():
+    """普通用户 may set targets only for 负责人 within their own data scope."""
+    async def scenario():
+        async with await _make_session() as s:
+            await _seed(s, [
+                _sale(tenant_id=1, date=date(2026, 6, 2), owner="A", income_total=1000, profit=200),
+                _sale(tenant_id=1, date=date(2026, 6, 2), owner="B", income_total=500, profit=80),
+            ])
+            ym = "2026-06"
+
+            # scope ["A"] → can save A, and it persists
+            ua = User(id=2, tenant_id=1, username="ua", password_hash="x",
+                      role=ROLE_TENANT_USER, data_scope_owners=["A"])
+            res = await save_my_targets(
+                body=TargetSave(year_month=ym, items=[
+                    TargetSaveItem(owner="A", target_sales=800, target_profit=160, target_profit_rate=0.2),
+                ]),
+                user=ua, db=s,
+            )
+            assert res.data["saved"] == 1
+            assert float((await t.targets_map(s, 1, ym))["A"].target_sales) == 800.0
+
+            # scope ["A"] → editing B (not theirs) is rejected
+            with pytest.raises(HTTPException) as ei:
+                await save_my_targets(
+                    body=TargetSave(year_month=ym, items=[
+                        TargetSaveItem(owner="B", target_sales=1, target_profit=1, target_profit_rate=0.1),
+                    ]),
+                    user=ua, db=s,
+                )
+            assert ei.value.status_code == 403
+
+            # scope [] (sees nothing) → may edit nothing
+            ue = User(id=3, tenant_id=1, username="ue", password_hash="x",
+                      role=ROLE_TENANT_USER, data_scope_owners=[])
+            with pytest.raises(HTTPException) as ei2:
+                await save_my_targets(
+                    body=TargetSave(year_month=ym, items=[
+                        TargetSaveItem(owner="A", target_sales=1, target_profit=1, target_profit_rate=0.1),
+                    ]),
+                    user=ue, db=s,
+                )
+            assert ei2.value.status_code == 403
+
+            # scope None (unrestricted) → may edit any owner
+            un = User(id=4, tenant_id=1, username="un", password_hash="x",
+                      role=ROLE_TENANT_USER, data_scope_owners=None)
+            res2 = await save_my_targets(
+                body=TargetSave(year_month=ym, items=[
+                    TargetSaveItem(owner="B", target_sales=300, target_profit=50, target_profit_rate=0.1),
+                ]),
+                user=un, db=s,
+            )
+            assert res2.data["saved"] == 1
+            assert float((await t.targets_map(s, 1, ym))["B"].target_sales) == 300.0
     asyncio.run(scenario())
 
 

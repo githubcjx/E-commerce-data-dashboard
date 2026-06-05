@@ -10,4 +10,7 @@ export const fetchRanking = (year_month) =>
   client.get("/api/targets/ranking", { params: { year_month } });
 export const fetchMyTargets = (year_month) =>
   client.get("/api/targets/me", { params: { year_month } });
+// Self-service: a 普通用户 saves targets for owners within their own scope.
+export const saveMyTargets = (year_month, items) =>
+  client.put("/api/targets/me", { year_month, items });
 export const fetchReminder = () => client.get("/api/targets/reminder");

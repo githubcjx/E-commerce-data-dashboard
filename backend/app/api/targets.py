@@ -112,6 +112,34 @@ async def my_targets(
     return ApiResponse(data={"year_month": year_month, "rows": rows})
 
 
+@router.put("/me", response_model=ApiResponse[dict])
+async def save_my_targets(
+    body: TargetSave,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Self-service edit: a 普通用户 sets targets for the 负责人 within their
+    OWN data scope. Admins keep the broader PUT /api/targets (whole tenant).
+
+    Scope is enforced server-side: every submitted owner must be in the
+    caller's effective_scope_owners. NULL scope (=sees everything) may edit
+    any owner; an empty scope ([]) may edit none.
+    """
+    _valid_ym(body.year_month)
+    if user.tenant_id is None:
+        raise HTTPException(status_code=400, detail="无所属企业")
+    scope = effective_scope_owners(user)  # None=all, []=none, [...]=limited
+    if scope is not None:
+        allowed = set(scope)
+        if not allowed:
+            raise HTTPException(status_code=403, detail="当前账号没有可编辑的目标")
+        outside = next((it.owner for it in body.items if it.owner not in allowed), None)
+        if outside is not None:
+            raise HTTPException(status_code=403, detail=f"无权编辑「{outside}」的目标")
+    saved = await svc.save_targets(db, user.tenant_id, body.year_month, body.items)
+    return ApiResponse(data={"saved": saved})
+
+
 @router.get("/reminder", response_model=ApiResponse[dict])
 async def reminder(
     tenant_id: int | None = Query(default=None),
