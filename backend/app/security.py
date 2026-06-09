@@ -27,9 +27,14 @@ def verify_password(password: str, hashed: str) -> bool:
         return False
 
 
-def create_token(user_id: int, role: str, tenant_id: int | None) -> tuple[str, datetime]:
+def create_token(
+    user_id: int, role: str, tenant_id: int | None, token_version: int = 0,
+) -> tuple[str, datetime]:
     expire = datetime.now(timezone.utc) + timedelta(days=settings.jwt_expire_days)
-    payload = {"sub": str(user_id), "role": role, "tenant_id": tenant_id, "exp": expire}
+    payload = {
+        "sub": str(user_id), "role": role, "tenant_id": tenant_id,
+        "tv": token_version, "exp": expire,
+    }
     token = jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
     return token, expire
 
@@ -56,6 +61,14 @@ async def get_current_user(request: Request, db: AsyncSession = Depends(get_db))
     user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="账号不存在")
+    # Session epoch check: a password change bumps users.token_version, so any
+    # token minted before it (carrying the old `tv`) is rejected here, logging
+    # that account out on every device. Missing `tv` (tokens predating the
+    # feature) reads as 0, matching the default — no forced logout on deploy.
+    if int(payload.get("tv", 0)) != int(user.token_version or 0):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="登录凭证已失效，请重新登录",
+        )
     return user
 
 

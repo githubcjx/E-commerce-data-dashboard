@@ -47,7 +47,7 @@ async def login(body: LoginRequest, request: Request, db: AsyncSession = Depends
         tenant_brief = TenantBrief.model_validate(tenant)
 
     record_login_success(request)
-    token, expire = create_token(user.id, user.role, user.tenant_id)
+    token, expire = create_token(user.id, user.role, user.tenant_id, user.token_version)
     return ApiResponse(data=LoginResponse(
         token=token,
         expire_at=expire,
