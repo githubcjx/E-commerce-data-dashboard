@@ -278,6 +278,10 @@ async def update_user(
         if "password" not in allowed_fields:
             raise HTTPException(status_code=403, detail="无权修改密码")
         target.password_hash = hash_password(body.password)
+        # Invalidate every existing login for this account: bump the session
+        # epoch so all previously issued JWTs (old `tv`) are rejected, forcing
+        # a re-login on all devices.
+        target.token_version = int(target.token_version or 0) + 1
 
     if "display_name" in sent:
         if "display_name" not in allowed_fields:

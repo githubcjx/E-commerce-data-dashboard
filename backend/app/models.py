@@ -219,6 +219,14 @@ class User(Base):
     can_manage_scope: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="0",
     )
+    # Session epoch. Bumped on every password change so that all JWTs issued
+    # before the change (which carry the old value in their `tv` claim) are
+    # rejected — forcing a re-login on every device. Defaults to 0; tokens
+    # predating this column have no `tv` claim and are read as 0, so they
+    # stay valid until they expire or the password is next changed.
+    token_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0",
+    )
     created_by: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
