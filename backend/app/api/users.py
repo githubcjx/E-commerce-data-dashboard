@@ -93,12 +93,15 @@ def _can_edit(actor: User, target: User) -> tuple[bool, set[str]]:
     return False, set()
 
 
-def _validate_role(role: str) -> None:
-    if role not in ASSIGNABLE_ROLES:
-        raise HTTPException(
-            status_code=400,
-            detail="角色非法（仅可设置为 tenant_admin / tenant_user）",
+def _validate_role(role: str, *, allow_super: bool = False) -> None:
+    valid = ASSIGNABLE_ROLES | ({ROLE_TENANT_SUPER_ADMIN} if allow_super else set())
+    if role not in valid:
+        detail = (
+            "角色非法（仅可设置为 tenant_super_admin / tenant_admin / tenant_user）"
+            if allow_super
+            else "角色非法（仅可设置为 tenant_admin / tenant_user）"
         )
+        raise HTTPException(status_code=400, detail=detail)
 
 
 async def _resolve_departments(
@@ -285,7 +288,8 @@ async def update_user(
     if "role" in sent and body.role is not None and body.role != target.role:
         if "role" not in allowed_fields:
             raise HTTPException(status_code=403, detail="无权修改角色")
-        _validate_role(body.role)
+        # Only the platform admin may promote/demote a 超级管理员 (跨部门).
+        _validate_role(body.role, allow_super=(actor.role == ROLE_PLATFORM_ADMIN))
         new_role = body.role
 
     # Department membership — full-replace semantics. When the role is
