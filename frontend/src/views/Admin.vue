@@ -242,6 +242,11 @@ const dialogAllowsPrivileged = computed(() => {
   return canEditPrivileged(editing.value);
 });
 
+// The 超级管理员 (跨部门) option is offered only when the platform admin is
+// editing an existing account — a super belongs to no department. Also
+// surfaced when editing a super so the select reflects the current role.
+const canAssignSuper = computed(() => !!editing.value && me.value?.role === ROLE_PLATFORM);
+
 // Whether the data_scope_owners picker is visible in the current dialog:
 //  - Super / platform: always visible when the form has privileged controls
 //  - Plain admin: only when editing a tenant_user AND their own
@@ -250,7 +255,8 @@ const dialogAllowsPrivileged = computed(() => {
 const showScopeField = computed(() => {
   if (!dialogOpen.value) return false;
   // The field controls data_scope_owners which only applies to tenant_user.
-  const targetRole = editing.value ? editing.value.role : form.value.role;
+  // Track the in-form role so switching role live hides/shows the field.
+  const targetRole = form.value.role;
   if (targetRole !== ROLE_TENANT_USER) return false;
   if (userStore.isPlatformAdmin || userStore.isTenantSuperAdmin) return true;
   if (userStore.isTenantPlainAdmin) return !!userStore.user?.can_manage_scope;
@@ -261,17 +267,24 @@ const showScopeField = computed(() => {
 // editing/creating a tenant_admin target AND the actor is super-class.
 const canToggleManageScope = computed(() => {
   if (!dialogOpen.value) return false;
-  const targetRole = editing.value ? editing.value.role : form.value.role;
-  if (targetRole !== ROLE_TENANT_ADMIN) return false;
+  if (form.value.role !== ROLE_TENANT_ADMIN) return false;
   return dialogAllowsPrivileged.value;
 });
 
+// A 超级管理员 / 平台管理员 belongs to no department; everyone else must
+// pick at least one. Tracks the in-form role so promoting/demoting live
+// toggles the department picker.
 const departmentRequired = computed(() => {
   if (!dialogOpen.value) return false;
-  if (!editing.value) {
-    return form.value.role === ROLE_TENANT_USER || form.value.role === ROLE_TENANT_ADMIN;
+  return form.value.role === ROLE_TENANT_USER || form.value.role === ROLE_TENANT_ADMIN;
+});
+
+// Promoting to 超级管理员 detaches the user from every department.
+watch(() => form.value.role, (role) => {
+  if (role === ROLE_TENANT_SUPER || role === ROLE_PLATFORM) {
+    form.value.department_ids = [];
+    departmentErr.value = "";
   }
-  return editing.value.role === ROLE_TENANT_USER || editing.value.role === ROLE_TENANT_ADMIN;
 });
 
 function toggleScopeOwner(name) {
@@ -968,7 +981,11 @@ watch(() => route.query.tenant_id, async () => {
             <select class="select" v-model="form.role">
               <option value="tenant_user">普通用户</option>
               <option value="tenant_admin">管理员</option>
+              <option v-if="canAssignSuper" value="tenant_super_admin">超级管理员（跨部门）</option>
             </select>
+            <div v-if="form.role === ROLE_TENANT_SUPER" class="t-muted" style="font-size:11px;margin-top:4px">
+              超级管理员不归属任何部门，可查看企业全部数据。
+            </div>
           </div>
         </template>
 
