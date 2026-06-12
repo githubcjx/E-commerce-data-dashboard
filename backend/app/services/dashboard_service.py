@@ -778,7 +778,8 @@ async def get_category_breakdown(
     view_department_id: int | None = None,
     user: User | None = None,
 ):
-    """Per-category aggregate with prev-period 环比 on sales + profit.
+    """Per-category aggregate with prev-period 环比 on sales + profit,
+    plus percentage-point 差额 on 公司利润率 / 成本率 / 快递费率.
 
     Fixed cost allocation per category: each shop's full-range fixed cost
     (apportioned across fee groups for the window) is split into the
@@ -906,20 +907,32 @@ async def get_category_breakdown(
             prev_cat_fixed = _cat_allocated_fixed(prev_per_shop, prev_fixed, prev_sales_total)
             prev_kpi = _kpis_from_per_shop(prev_per_shop, tax_rates, prev_cat_fixed)
         else:
-            prev_kpi = {"sales": 0.0, "profit": 0.0}
+            prev_kpi = None
 
+        def _rate_diff(key: str) -> float | None:
+            # 差额 = 本期率 − 上期率，单位是百分点（8% vs 7% → +1），不是环比变化率
+            return kpi[key] - prev_kpi[key] if prev_kpi is not None else None
+
+        prev_sales = prev_kpi["sales"] if prev_kpi else 0.0
+        prev_profit = prev_kpi["profit"] if prev_kpi else 0.0
         out.append({
             "name": cat,
             "sales": kpi["sales"],
-            "sales_prev": prev_kpi.get("sales", 0.0),
-            "sales_delta_pct": _delta_pct(kpi["sales"], prev_kpi.get("sales", 0.0)),
+            "sales_prev": prev_sales,
+            "sales_delta_pct": _delta_pct(kpi["sales"], prev_sales),
             "profit": kpi["profit"],
-            "profit_prev": prev_kpi.get("profit", 0.0),
-            "profit_delta_pct": _delta_pct(kpi["profit"], prev_kpi.get("profit", 0.0)),
+            "profit_prev": prev_profit,
+            "profit_delta_pct": _delta_pct(kpi["profit"], prev_profit),
             "company_profit_rate": kpi["companyProfitRate"],
+            "company_profit_rate_prev": prev_kpi["companyProfitRate"] if prev_kpi else None,
+            "company_profit_rate_diff": _rate_diff("companyProfitRate"),
             "cost_rate": kpi["costRate"],
+            "cost_rate_prev": prev_kpi["costRate"] if prev_kpi else None,
+            "cost_rate_diff": _rate_diff("costRate"),
             "refund_rate": kpi["refundRate"],
             "ship_pct": kpi["shipPct"],
+            "ship_pct_prev": prev_kpi["shipPct"] if prev_kpi else None,
+            "ship_pct_diff": _rate_diff("shipPct"),
         })
     out.sort(key=lambda x: x["sales"], reverse=True)
     return out

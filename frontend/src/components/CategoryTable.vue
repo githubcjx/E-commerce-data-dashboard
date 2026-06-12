@@ -42,6 +42,14 @@ function delta(v) {
   const cls = v > 0 ? "t-pos" : v < 0 ? "t-neg" : "t-muted";
   return { text: `${sign}${Math.abs(v).toFixed(2)}%`, cls };
 }
+
+// 差额 cell — 百分点差（本期率 − 上期率，如 8% vs 7% → +1.00%），不是环比变化率
+const rateDiff = delta;
+
+function prevRateTitle(v) {
+  if (v === null || v === undefined) return "上期无数据";
+  return `上期 ${Number(v).toFixed(2)}%`;
+}
 </script>
 
 <template>
@@ -53,6 +61,7 @@ function delta(v) {
         <slot name="handle" />
       </div>
     </header>
+    <div class="cat-scroll">
     <table class="tbl cat-tbl">
       <thead>
         <tr>
@@ -76,14 +85,26 @@ function delta(v) {
           <th style="cursor:pointer" @click="sortBy('company_profit_rate')">
             公司利润率 <span class="sort-mark">{{ arrow("company_profit_rate") }}</span>
           </th>
+          <th>
+            <div>利润率差额</div>
+            <div class="prev-sub">对比 {{ prevLabel }}</div>
+          </th>
           <th style="cursor:pointer" @click="sortBy('cost_rate')">
             成本率 <span class="sort-mark">{{ arrow("cost_rate") }}</span>
+          </th>
+          <th>
+            <div>成本率差额</div>
+            <div class="prev-sub">对比 {{ prevLabel }}</div>
           </th>
           <th style="cursor:pointer" @click="sortBy('refund_rate')">
             发货退款率 <span class="sort-mark">{{ arrow("refund_rate") }}</span>
           </th>
           <th style="cursor:pointer" @click="sortBy('ship_pct')">
             快递费率 <span class="sort-mark">{{ arrow("ship_pct") }}</span>
+          </th>
+          <th>
+            <div>快递费率差额</div>
+            <div class="prev-sub">对比 {{ prevLabel }}</div>
           </th>
         </tr>
       </thead>
@@ -102,17 +123,29 @@ function delta(v) {
             {{ delta(r.profit_delta_pct).text }}
           </td>
           <td :class="r.company_profit_rate < 0 ? 't-neg' : ''">{{ formatValue(r.company_profit_rate, "percent") }}</td>
+          <td :class="rateDiff(r.company_profit_rate_diff).cls" :title="prevRateTitle(r.company_profit_rate_prev)">
+            {{ rateDiff(r.company_profit_rate_diff).text }}
+          </td>
           <td>{{ formatValue(r.cost_rate, "percent") }}</td>
+          <td :class="rateDiff(r.cost_rate_diff).cls" :title="prevRateTitle(r.cost_rate_prev)">
+            {{ rateDiff(r.cost_rate_diff).text }}
+          </td>
           <td :class="r.refund_rate >= 40 ? 't-neg' : ''">{{ formatValue(r.refund_rate, "percent") }}</td>
           <td>{{ formatValue(r.ship_pct, "percent") }}</td>
+          <td :class="rateDiff(r.ship_pct_diff).cls" :title="prevRateTitle(r.ship_pct_prev)">
+            {{ rateDiff(r.ship_pct_diff).text }}
+          </td>
         </tr>
-        <tr v-if="!sorted.length"><td colspan="9" class="empty-state">暂无数据，请先在「导入」页面上传 Excel</td></tr>
+        <tr v-if="!sorted.length"><td colspan="12" class="empty-state">暂无数据，请先在「导入」页面上传 Excel</td></tr>
       </tbody>
     </table>
+    </div>
   </section>
 </template>
 
 <style scoped>
+/* 12 列 nowrap 在窄屏可能超出面板宽度 — 兜底横向滚动而不是截断表头 */
+.cat-scroll { overflow-x: auto; }
 .cat-tbl th, .cat-tbl td { white-space: nowrap; }
 .sort-mark { margin-left: 6px; color: var(--ink-5); font-family: var(--font-mono); }
 .prev-sub {
