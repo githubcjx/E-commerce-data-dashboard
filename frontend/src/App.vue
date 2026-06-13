@@ -6,6 +6,8 @@ import ToastHost from "./components/ToastHost.vue";
 import DragHint from "./components/DragHint.vue";
 import UpdateBanner from "./components/UpdateBanner.vue";
 import TargetReminder from "./components/TargetReminder.vue";
+import ChangelogModal from "./components/ChangelogModal.vue";
+import ChangelogNotice from "./components/ChangelogNotice.vue";
 import { useUiStore } from "./stores/ui";
 import { useUserStore } from "./stores/user";
 import { useVersionStore } from "./stores/version";
@@ -52,4 +54,7 @@ watch(() => userStore.user?.role, maybeStartReminder);
   <DragHint :visible="ui.isDragging" />
   <ToastHost />
   <TargetReminder />
+  <ChangelogModal />
+  <!-- 更新提示只在登录后的页面出现，登录页不打扰 -->
+  <ChangelogNotice v-if="showChrome" />
 </template>
