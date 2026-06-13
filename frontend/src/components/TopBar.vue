@@ -2,10 +2,12 @@
 import { computed, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useUserStore } from "../stores/user";
+import { useChangelogStore } from "../stores/changelog";
 
 const route = useRoute();
 const router = useRouter();
 const userStore = useUserStore();
+const changelog = useChangelogStore();
 
 const updatedAt = computed(() => {
   const d = new Date();
@@ -35,6 +37,11 @@ function logout() {
 function gotoAdmin() {
   menuOpen.value = false;
   router.push({ path: "/admin" });
+}
+
+function openChangelog() {
+  menuOpen.value = false;
+  changelog.openModal();
 }
 </script>
 
@@ -95,6 +102,7 @@ function gotoAdmin() {
                 所属企业：<span class="mono">{{ userStore.tenant.code }}</span> · {{ userStore.tenant.name }}
               </div>
             </div>
+            <button class="pop-item" @click="openChangelog">更新日志</button>
             <button class="pop-item" @click="logout">退出登录</button>
           </div>
         </div>
