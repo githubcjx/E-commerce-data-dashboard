@@ -77,6 +77,13 @@ function kpiSparklineGranularity(startStr, endStr) {
   return "month";                  // beyond → monthly
 }
 
+// 过期响应守卫：快速连续切换（tab/日期/筛选/部门视角/指标）时，慢的旧请求
+// 可能在新请求之后才返回，若直接写 state 会把新数据盖回旧的。每类数据各持
+// 一个自增序号 — 发请求时取号，响应回来只有"仍是最新号"才允许写入。
+// KPI/趋势/类目各自独立，互不干扰（例如切 tab 的同时点 KPI 卡切指标）。
+// 放模块级而非 state：纯内部簿记，不需要响应式。
+const _seq = { kpi: 0, trend: 0, category: 0, all: 0 };
+
 export const useDashboardStore = defineStore("dashboard", {
   state: () => ({
     // Top filter — drives EVERYTHING: KPI range, category table range, AND
@@ -168,8 +175,10 @@ export const useDashboardStore = defineStore("dashboard", {
       } catch (_) { this.departmentOptions = []; }
     },
     async loadKpi() {
+      const seq = ++_seq.kpi;
       const granularity = kpiSparklineGranularity(this.startDate, this.endDate);
       const data = await fetchKpi({ ...this._baseParams, granularity });
+      if (seq !== _seq.kpi) return; // 已有更新的请求发出 — 丢弃这份过期数据
       this.kpiItems = data.items || [];
       this.currentLabel = data.current_label || "";
       this.previousLabel = data.previous_label || "";
@@ -177,28 +186,36 @@ export const useDashboardStore = defineStore("dashboard", {
     async loadTrend() {
       // Trend chart now mirrors the top filter exactly — same range, same
       // bucketing. No separate decisions, no highlight overlay.
+      const seq = ++_seq.trend;
       const data = await fetchTrend({
         ...this._baseParams,
         granularity: this.topGranularity,
         metric: this.activeMetric,
       });
+      if (seq !== _seq.trend) return;
       this.trendPoints = data.points || [];
       this.trendGranularityServed = data.granularity || this.topGranularity;
     },
     async loadCategory() {
+      const seq = ++_seq.category;
       const {
         start_date, end_date, shop_code, owner, category, view_department_id,
       } = this._baseParams;
       const params = { start_date, end_date, shop_code, owner, category };
       if (view_department_id != null) params.view_department_id = view_department_id;
-      this.categoryRows = await fetchCategory(params);
+      const rows = await fetchCategory(params);
+      if (seq !== _seq.category) return;
+      this.categoryRows = rows;
     },
     async loadAll() {
+      const seq = ++_seq.all;
       this.loading = true;
       try {
         await Promise.all([this.loadKpi(), this.loadTrend(), this.loadCategory()]);
       } finally {
-        this.loading = false;
+        // 旧的 loadAll 收尾时若已有新的在途，loading 交给最新那次关闭，
+        // 避免旧请求提前把新请求的加载态熄灭。
+        if (seq === _seq.all) this.loading = false;
       }
     },
     async loadLayout() {
